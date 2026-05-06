@@ -82,6 +82,10 @@ fragment-splitting implementation is a stepping stone; the faster mature kernel
 should preserve brush polygons, classify them through the tree, and emit only
 the visible categories.
 
+The expanded doctrine lives in
+`docs/research/realtime-csg-doctrine.md`; keep this file focused on the current
+crate shape.
+
 Procedural non-CSG primitives are additive:
 
 - `CylinderZ` for tethers, shafts, columns, conduits, and ring anchors
