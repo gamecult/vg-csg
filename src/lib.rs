@@ -1,0 +1,21 @@
+//! Lean constructive geometry tools for VibeGeometry.
+//!
+//! This crate borrows RealtimeCSG's useful public shape: ordered brushes,
+//! operation types, dirtied generations, and a rebuildable output mesh. The
+//! hidden native RealtimeCSG kernel is not public, so this starts with the
+//! smallest honest CSG organ: exact box subtraction against additive boxes,
+//! plus additive procedural primitives for the habitat forms we keep needing.
+
+mod assembler;
+mod brush;
+mod dsl;
+mod mesh;
+mod primitives;
+
+pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
+pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, Primitive};
+pub use dsl::LevelDsl;
+pub use mesh::TriangleMesh;
+pub use primitives::{
+    DomeCapZSpec, FloretArmSpec, append_cylinder_z, append_dome_cap_z, append_floret_arm,
+};

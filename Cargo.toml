@@ -1,0 +1,12 @@
+[package]
+name = "vg_csg"
+version = "0.1.0"
+edition = "2024"
+description = "Lean Bevy-math constructive geometry assembler for VibeGeometry blockouts"
+license = "MIT"
+
+[dependencies]
+bevy_math = "0.17"
+
+[dev-dependencies]
+approx = "0.5"

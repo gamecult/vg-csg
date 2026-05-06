@@ -1,0 +1,216 @@
+use bevy_math::{Quat, Vec3};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BrushId(pub u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct MaterialId(pub u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrushOp {
+    Add,
+    Subtract,
+    Intersect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl Aabb {
+    pub fn from_center_size(center: Vec3, size: Vec3) -> Self {
+        let half = size * 0.5;
+        Self {
+            min: center - half,
+            max: center + half,
+        }
+    }
+
+    pub fn new(min: Vec3, max: Vec3) -> Self {
+        Self { min, max }
+    }
+
+    pub fn size(self) -> Vec3 {
+        self.max - self.min
+    }
+
+    pub fn center(self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.max.x > self.min.x && self.max.y > self.min.y && self.max.z > self.min.z
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        self.min.x < other.max.x
+            && self.max.x > other.min.x
+            && self.min.y < other.max.y
+            && self.max.y > other.min.y
+            && self.min.z < other.max.z
+            && self.max.z > other.min.z
+    }
+
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        if !self.intersects(other) {
+            return None;
+        }
+
+        let min = self.min.max(other.min);
+        let max = self.max.min(other.max);
+        let hit = Self { min, max };
+        hit.is_valid().then_some(hit)
+    }
+
+    pub fn contains_point(self, point: Vec3) -> bool {
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+            && point.z >= self.min.z
+            && point.z <= self.max.z
+    }
+
+    pub fn contains_point_strict(self, point: Vec3, epsilon: f32) -> bool {
+        point.x > self.min.x + epsilon
+            && point.x < self.max.x - epsilon
+            && point.y > self.min.y + epsilon
+            && point.y < self.max.y - epsilon
+            && point.z > self.min.z + epsilon
+            && point.z < self.max.z - epsilon
+    }
+
+    pub fn subtract_box(self, cutter: Self) -> Vec<Self> {
+        let Some(hit) = self.intersection(cutter) else {
+            return vec![self];
+        };
+
+        let mut pieces = Vec::with_capacity(6);
+
+        push_valid(
+            &mut pieces,
+            Self::new(self.min, Vec3::new(hit.min.x, self.max.y, self.max.z)),
+        );
+        push_valid(
+            &mut pieces,
+            Self::new(Vec3::new(hit.max.x, self.min.y, self.min.z), self.max),
+        );
+
+        let x_min = self.min.x.max(hit.min.x);
+        let x_max = self.max.x.min(hit.max.x);
+
+        push_valid(
+            &mut pieces,
+            Self::new(
+                Vec3::new(x_min, self.min.y, self.min.z),
+                Vec3::new(x_max, hit.min.y, self.max.z),
+            ),
+        );
+        push_valid(
+            &mut pieces,
+            Self::new(
+                Vec3::new(x_min, hit.max.y, self.min.z),
+                Vec3::new(x_max, self.max.y, self.max.z),
+            ),
+        );
+
+        let y_min = self.min.y.max(hit.min.y);
+        let y_max = self.max.y.min(hit.max.y);
+
+        push_valid(
+            &mut pieces,
+            Self::new(
+                Vec3::new(x_min, y_min, self.min.z),
+                Vec3::new(x_max, y_max, hit.min.z),
+            ),
+        );
+        push_valid(
+            &mut pieces,
+            Self::new(
+                Vec3::new(x_min, y_min, hit.max.z),
+                Vec3::new(x_max, y_max, self.max.z),
+            ),
+        );
+
+        pieces
+    }
+}
+
+fn push_valid(pieces: &mut Vec<Aabb>, bounds: Aabb) {
+    if bounds.is_valid() {
+        pieces.push(bounds);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Primitive {
+    Box {
+        bounds: Aabb,
+    },
+    CylinderZ {
+        center: Vec3,
+        radius: f32,
+        depth: f32,
+        segments: usize,
+    },
+    DomeCapZ {
+        center: Vec3,
+        radius: f32,
+        height: f32,
+        rings: usize,
+        segments: usize,
+    },
+    FloretArm {
+        anchor: Vec3,
+        direction: Vec3,
+        length: f32,
+        root_width: f32,
+        tip_width: f32,
+        thickness: f32,
+        tip_lift: f32,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct Brush {
+    pub id: BrushId,
+    pub name: String,
+    pub op: BrushOp,
+    pub primitive: Primitive,
+    pub material: MaterialId,
+    pub rotation: Quat,
+    pub generation: u64,
+}
+
+impl Brush {
+    pub fn new(
+        id: BrushId,
+        name: impl Into<String>,
+        op: BrushOp,
+        primitive: Primitive,
+        material: MaterialId,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            op,
+            primitive,
+            material,
+            rotation: Quat::IDENTITY,
+            generation: 0,
+        }
+    }
+
+    pub fn set_dirty(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub fn as_box(&self) -> Option<Aabb> {
+        match self.primitive {
+            Primitive::Box { bounds } => Some(bounds),
+            _ => None,
+        }
+    }
+}
