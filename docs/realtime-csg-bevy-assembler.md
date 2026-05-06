@@ -17,6 +17,24 @@ The public C# layer still exposes the parts worth stealing cleanly:
 - dirty generation counters
 - a rebuild step that turns authored brushes into renderable meshes
 
+The older public demo is more important than the Unity product for clean
+algorithm work. Sander van Rossen's 2009-2010 blog series describes the
+principles directly: consistent epsilon classification, half-edges, polygon
+cutting, convex brush construction, boolean categorization, and the idea that
+subtraction can be expressed as composed logical operations. The
+`LogicalError/Realtime-CSG-demo` repository is public C# code from the article
+"Real Time Constructive Solid Geometry" in *Game Development Tools*. It is now
+the preferred research input for algorithmic behavior because it is public
+source tied to the article rather than a closed Unity native kernel.
+
+Verified public sources:
+
+- Sander van Rossen, "Realtime CSG - Part 1"
+- Sander van Rossen, "Realtime CSG - Part 5"
+- Sander van Rossen and Matthew Baranowski, "Real-Time Constructive Solid
+  Geometry", *Game Development Tools*
+- `LogicalError/Realtime-CSG-demo`
+
 That shape maps well to Bevy: keep authoring data as lightweight brush records,
 rebuild only dirty worlds, and emit plain mesh buffers that can later be handed
 to Bevy render assets.
@@ -49,10 +67,20 @@ let output = level.assemble();
 assert!(output.mesh.triangle_count() > 12);
 ```
 
-The first actual CSG operator is exact AABB subtraction against additive AABB
-solids. A cutter splits a source box into up to six surviving slabs. This is
-enough for doors, windows, vents, corridor punches, terraces, anchor trenches,
-and level blockout loops.
+The first actual CSG operator was exact AABB subtraction against additive AABB
+solids. The current kernel has moved to convex decomposition: an additive
+convex solid is split against each outward cutter plane, outside fragments are
+emitted, and the inside remainder is discarded after the final plane. This
+supports angled box cuts and gives us the correct shape for a future general
+convex brush kernel.
+
+The important doctrinal adjustment from the public demo and blog series is that
+real-time CSG should think in **classification**, not only carving. A polygon is
+inside, outside, aligned, or reverse-aligned relative to another node. Boolean
+operations are then mostly routing tables for those categories. Our current
+fragment-splitting implementation is a stepping stone; the faster mature kernel
+should preserve brush polygons, classify them through the tree, and emit only
+the visible categories.
 
 Procedural non-CSG primitives are additive:
 
@@ -117,18 +145,22 @@ or sweep than by carving:
 - flower-like utility crests and other habitat-specific silhouettes
 
 The immediate next upgrade is not "more primitives." It is a stronger convex
-brush kernel: plane classification, polygon clipping, fragment merge policy,
-and a BVH or spatial hash so cutter cost does not scale like a punishment.
+brush kernel: plane classification, polygon clipping, category routing,
+fragment merge policy, and a BVH or spatial hash so cutter cost does not scale
+like a punishment.
 
 ## Limits
 
 `vg_csg` is not yet a full RealtimeCSG replacement.
 
-- only box subtractors affect box solids
+- subtractive convex support currently covers axis-aligned and oriented boxes
 - non-box subtractors are reported and ignored
 - intersect brushes are reported and ignored
 - output is Bevy-compatible mesh data, not yet a Bevy `Mesh` asset constructor
 - there is no editor gizmo, ECS plugin, or incremental spatial index yet
+- current subtraction emits split fragments with generated cap polygons; the
+  target kernel should move toward article/demo-style category routing over
+  brush polygons for speed and cleaner material behavior
 
 Those limits are explicit because invisible ambition is how you get haunted by
 your own abstractions. The useful loop exists now: script brushes, assemble,

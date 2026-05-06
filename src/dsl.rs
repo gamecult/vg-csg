@@ -1,4 +1,4 @@
-use bevy_math::Vec3;
+use bevy_math::{Quat, Vec3};
 
 use crate::{
     Aabb, Assembler, BrushId, BrushOp, BuildOutput, DomeCapZSpec, FloretArmSpec, MaterialId,
@@ -29,6 +29,29 @@ impl LevelDsl {
     pub fn cut_box(&mut self, name: impl Into<String>, center: Vec3, size: Vec3) -> BrushId {
         self.assembler
             .cut_box(name, Aabb::from_center_size(center, size))
+    }
+
+    pub fn solid_oriented_box(
+        &mut self,
+        name: impl Into<String>,
+        center: Vec3,
+        size: Vec3,
+        rotation: Quat,
+        material: MaterialId,
+    ) -> BrushId {
+        self.assembler
+            .solid_oriented_box(name, center, size, rotation, material)
+    }
+
+    pub fn cut_oriented_box(
+        &mut self,
+        name: impl Into<String>,
+        center: Vec3,
+        size: Vec3,
+        rotation: Quat,
+    ) -> BrushId {
+        self.assembler
+            .cut_oriented_box(name, center, size, rotation)
     }
 
     pub fn cylinder_z(

@@ -8,12 +8,14 @@
 
 mod assembler;
 mod brush;
+mod convex;
 mod dsl;
 mod mesh;
 mod primitives;
 
 pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, Primitive};
+pub use convex::{ConvexPolygon, ConvexSolid, Plane};
 pub use dsl::LevelDsl;
 pub use mesh::TriangleMesh;
 pub use primitives::{

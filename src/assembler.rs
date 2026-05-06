@@ -1,8 +1,8 @@
 use bevy_math::Vec3;
 
 use crate::{
-    Aabb, Brush, BrushId, BrushOp, MaterialId, Primitive, TriangleMesh, append_cylinder_z,
-    append_dome_cap_z, append_floret_arm,
+    Aabb, Brush, BrushId, BrushOp, ConvexSolid, MaterialId, Primitive, TriangleMesh,
+    append_cylinder_z, append_dome_cap_z, append_floret_arm,
     primitives::{DomeCapZSpec, FloretArmSpec},
 };
 
@@ -15,7 +15,7 @@ pub enum BuildWarning {
 #[derive(Clone, Debug, Default)]
 pub struct BuildReport {
     pub input_brushes: usize,
-    pub emitted_box_fragments: usize,
+    pub emitted_convex_fragments: usize,
     pub warnings: Vec<BuildWarning>,
 }
 
@@ -24,12 +24,6 @@ pub struct BuildOutput {
     pub mesh: TriangleMesh,
     pub report: BuildReport,
     pub generation: u64,
-}
-
-#[derive(Clone, Debug)]
-struct BoxSolid {
-    bounds: Aabb,
-    material: MaterialId,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -85,21 +79,71 @@ impl Assembler {
         )
     }
 
+    pub fn solid_oriented_box(
+        &mut self,
+        name: impl Into<String>,
+        center: Vec3,
+        size: Vec3,
+        rotation: bevy_math::Quat,
+        material: MaterialId,
+    ) -> BrushId {
+        self.add_brush(
+            name,
+            BrushOp::Add,
+            Primitive::OrientedBox {
+                center,
+                size,
+                rotation,
+            },
+            material,
+        )
+    }
+
+    pub fn cut_oriented_box(
+        &mut self,
+        name: impl Into<String>,
+        center: Vec3,
+        size: Vec3,
+        rotation: bevy_math::Quat,
+    ) -> BrushId {
+        self.add_brush(
+            name,
+            BrushOp::Subtract,
+            Primitive::OrientedBox {
+                center,
+                size,
+                rotation,
+            },
+            MaterialId::default(),
+        )
+    }
+
     pub fn build(&self) -> BuildOutput {
         let mut report = BuildReport {
             input_brushes: self.brushes.len(),
             ..BuildReport::default()
         };
         let mut mesh = TriangleMesh::new();
-        let mut boxes: Vec<BoxSolid> = Vec::new();
+        let mut solids: Vec<ConvexSolid> = Vec::new();
 
         for brush in &self.brushes {
             match brush.op {
                 BrushOp::Add => match &brush.primitive {
-                    Primitive::Box { bounds } => boxes.push(BoxSolid {
-                        bounds: *bounds,
-                        material: brush.material,
-                    }),
+                    Primitive::Box { bounds } => {
+                        solids.push(ConvexSolid::from_aabb(*bounds, brush.material));
+                    }
+                    Primitive::OrientedBox {
+                        center,
+                        size,
+                        rotation,
+                    } => {
+                        solids.push(ConvexSolid::box_from_center_size(
+                            *center,
+                            *size,
+                            *rotation,
+                            brush.material,
+                        ));
+                    }
                     Primitive::CylinderZ {
                         center,
                         radius,
@@ -153,8 +197,8 @@ impl Assembler {
                     ),
                 },
                 BrushOp::Subtract => {
-                    if let Some(cutter) = brush.as_box() {
-                        boxes = subtract_from_boxes(&boxes, cutter);
+                    if let Some(cutter) = convex_cutter_for_brush(brush) {
+                        solids = subtract_from_solids(&solids, &cutter);
                     } else {
                         report
                             .warnings
@@ -171,9 +215,9 @@ impl Assembler {
             }
         }
 
-        report.emitted_box_fragments = boxes.len();
-        for solid in boxes {
-            mesh.append_box(solid.bounds, solid.material);
+        report.emitted_convex_fragments = solids.len();
+        for solid in solids {
+            solid.append_to_mesh(&mut mesh);
         }
 
         BuildOutput {
@@ -205,15 +249,27 @@ impl Assembler {
     }
 }
 
-fn subtract_from_boxes(boxes: &[BoxSolid], cutter: Aabb) -> Vec<BoxSolid> {
-    let mut out = Vec::with_capacity(boxes.len() + 4);
-    for solid in boxes {
-        for bounds in solid.bounds.subtract_box(cutter) {
-            out.push(BoxSolid {
-                bounds,
-                material: solid.material,
-            });
-        }
+fn convex_cutter_for_brush(brush: &Brush) -> Option<ConvexSolid> {
+    match &brush.primitive {
+        Primitive::Box { bounds } => Some(ConvexSolid::from_aabb(*bounds, brush.material)),
+        Primitive::OrientedBox {
+            center,
+            size,
+            rotation,
+        } => Some(ConvexSolid::box_from_center_size(
+            *center,
+            *size,
+            *rotation,
+            brush.material,
+        )),
+        _ => None,
+    }
+}
+
+fn subtract_from_solids(solids: &[ConvexSolid], cutter: &ConvexSolid) -> Vec<ConvexSolid> {
+    let mut out = Vec::with_capacity(solids.len() + 4);
+    for solid in solids {
+        out.extend(solid.subtract_convex(cutter));
     }
     out
 }
@@ -240,7 +296,7 @@ mod tests {
         let output = Assembler::sample_room_with_door().build();
         let cutter = Aabb::from_center_size(Vec3::new(0.0, 4.0, 1.0), Vec3::new(1.2, 0.5, 2.0));
 
-        assert!(output.report.emitted_box_fragments > 2);
+        assert!(output.report.emitted_convex_fragments > 2);
         for tri in output.mesh.indices.chunks_exact(3) {
             let center = (output.mesh.positions[tri[0] as usize]
                 + output.mesh.positions[tri[1] as usize]
@@ -248,6 +304,28 @@ mod tests {
                 / 3.0;
             assert!(!cutter.contains_point_strict(center, 1.0e-4));
         }
+    }
+
+    #[test]
+    fn rotated_door_cut_produces_diagonal_portal_faces() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "wall",
+            Aabb::from_center_size(Vec3::new(0.0, 0.0, 1.5), Vec3::new(5.0, 0.5, 3.0)),
+            MaterialId(1),
+        );
+        asm.cut_oriented_box(
+            "angled void",
+            Vec3::new(0.0, 0.0, 1.5),
+            Vec3::new(1.5, 2.0, 2.0),
+            bevy_math::Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+        );
+
+        let output = asm.build();
+        assert!(output.report.emitted_convex_fragments > 2);
+        assert!(output.mesh.normals.iter().any(|normal| {
+            normal.x.abs() > 0.2 && normal.y.abs() > 0.2 && normal.z.abs() < 0.1
+        }));
     }
 
     #[test]

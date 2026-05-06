@@ -47,9 +47,9 @@ fn main() {
 
     let output = level.assemble();
     println!(
-        "brushes={} box_fragments={} vertices={} triangles={} warnings={}",
+        "brushes={} convex_fragments={} vertices={} triangles={} warnings={}",
         output.report.input_brushes,
-        output.report.emitted_box_fragments,
+        output.report.emitted_convex_fragments,
         output.mesh.vertex_count(),
         output.mesh.triangle_count(),
         output.report.warnings.len()

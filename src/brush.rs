@@ -149,6 +149,11 @@ pub enum Primitive {
     Box {
         bounds: Aabb,
     },
+    OrientedBox {
+        center: Vec3,
+        size: Vec3,
+        rotation: Quat,
+    },
     CylinderZ {
         center: Vec3,
         radius: f32,
