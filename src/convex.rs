@@ -330,6 +330,35 @@ fn polygon_normal(vertices: &[Vec3]) -> Vec3 {
 mod tests {
     use super::*;
 
+    fn assert_box_parity(solid: &ConvexSolid, material: MaterialId) {
+        assert_eq!(solid.polygons.len(), 6);
+        assert_eq!(solid.clip_planes.len(), 6);
+        assert!(
+            solid
+                .polygons
+                .iter()
+                .all(|polygon| polygon.vertices.len() == 4)
+        );
+        assert!(
+            solid
+                .polygons
+                .iter()
+                .all(|polygon| polygon.material == material)
+        );
+    }
+
+    #[test]
+    fn parity_box_brush_from_planes_has_six_quad_polygons() {
+        let solid = ConvexSolid::box_from_center_size(
+            Vec3::ZERO,
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            MaterialId(9),
+        );
+
+        assert_box_parity(&solid, MaterialId(9));
+    }
+
     #[test]
     fn subtract_center_box_emits_six_convex_fragments() {
         let source = ConvexSolid::box_from_center_size(

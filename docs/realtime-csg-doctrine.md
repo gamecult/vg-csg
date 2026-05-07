@@ -265,6 +265,12 @@ Algorithm migration steps:
 
 ## Acceptance Tests To Add
 
+- Where `vg_csg` exposes the same behavior as public RealtimeCSG/demo APIs,
+  maintain exact observable parity fixtures. These should compare public
+  behavior such as category vocabulary, brush plane/polygon counts, split
+  counts, visible/reversed semantics, bounds early-outs, and mesh output
+  invariants. Do not use vague "looks right" tests where a public seam has a
+  countable contract.
 - Two overlapping additive boxes produce no duplicate coplanar surface.
 - Subtraction is implemented as `!(!A || B)` and matches direct cases.
 - Intersection is implemented as `!(!A || !B)` and matches direct cases.

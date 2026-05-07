@@ -13,6 +13,14 @@ pub enum BrushOp {
     Intersect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PolygonCategory {
+    Inside,
+    Outside,
+    Aligned,
+    ReverseAligned,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
     pub min: Vec3,
