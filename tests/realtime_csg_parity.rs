@@ -1,5 +1,8 @@
 use bevy_math::{Quat, Vec3};
-use vg_csg::{Aabb, Assembler, ConvexSolid, MaterialId, PolygonCategory};
+use vg_csg::{
+    Aabb, Assembler, ConvexSolid, CsgBranchOp, CsgOperationType, CsgTreeArena, MaterialId,
+    PolygonCategory, Primitive,
+};
 
 #[test]
 fn parity_polygon_category_vocabulary_matches_public_demo() {
@@ -11,6 +14,44 @@ fn parity_polygon_category_vocabulary_matches_public_demo() {
     ];
 
     assert_eq!(categories.len(), 4);
+}
+
+#[test]
+fn parity_operation_type_ordinals_match_public_api() {
+    assert_eq!(CsgOperationType::Additive as u8, 0);
+    assert_eq!(CsgOperationType::Subtractive as u8, 1);
+    assert_eq!(CsgOperationType::Intersecting as u8, 2);
+}
+
+#[test]
+fn parity_demo_branch_vocabulary_matches_public_demo() {
+    let branches = [
+        CsgBranchOp::Addition,
+        CsgBranchOp::Subtraction,
+        CsgBranchOp::Common,
+    ];
+
+    assert_eq!(branches.len(), 3);
+}
+
+#[test]
+fn parity_tree_api_exposes_brush_branch_tree_handles() {
+    let mut arena = CsgTreeArena::new();
+    let brush = arena.generate_brush(
+        "brush",
+        CsgOperationType::Additive,
+        Primitive::Box {
+            bounds: Aabb::from_center_size(Vec3::ZERO, Vec3::ONE),
+        },
+        MaterialId(1),
+    );
+    let branch = arena.generate_branch("branch", CsgBranchOp::Addition, [brush.node]);
+    let tree = arena.generate_tree(branch.node);
+
+    assert_eq!(arena.brush_count(), 1);
+    assert_eq!(arena.branch_count(), 1);
+    assert_eq!(arena.child_nodes(branch).expect("branch"), &[brush.node]);
+    assert_eq!(tree.root, branch.node);
 }
 
 #[test]

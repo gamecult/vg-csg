@@ -12,6 +12,7 @@ mod convex;
 mod dsl;
 mod mesh;
 mod primitives;
+mod tree;
 
 pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
@@ -20,4 +21,8 @@ pub use dsl::LevelDsl;
 pub use mesh::TriangleMesh;
 pub use primitives::{
     DomeCapZSpec, FloretArmSpec, append_cylinder_z, append_dome_cap_z, append_floret_arm,
+};
+pub use tree::{
+    CsgBranchOp, CsgNode, CsgNodeId, CsgOperationType, CsgTree, CsgTreeArena, CsgTreeBranch,
+    CsgTreeBrush,
 };

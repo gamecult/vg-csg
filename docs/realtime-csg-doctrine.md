@@ -247,6 +247,20 @@ Process brush:
   emit visible pieces into render mesh
 ```
 
+`vg_csg` now exposes the first version of that public tree surface:
+
+- `CsgOperationType::{Additive, Subtractive, Intersecting}` with parity-tested
+  ordinals matching the public API
+- `CsgBranchOp::{Addition, Subtraction, Common}` matching the public demo
+- `CsgTreeArena`, `CsgTree`, `CsgTreeBranch`, `CsgTreeBrush`, and `CsgNodeId`
+- branch child replacement and operation mutation
+- brush operation mutation
+- compilation from tree intent into the current ordered assembler backend
+
+This is still not the final classifier kernel. It is the API skeleton that lets
+grammar and editor code speak in RealtimeCSG-shaped boolean trees while the
+backend grows into the category router.
+
 Algorithm migration steps:
 
 1. Add polygon categories and visible/reversed flags to `vg_csg`.
