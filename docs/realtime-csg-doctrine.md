@@ -142,6 +142,28 @@ Implication for `vg_csg`: every brush, polygon batch, and branch needs cheap
 bounds. Later BVH, hashed grid, or sweep-and-prune should be measured against
 the built-in tree culling instead of assumed superior by vibes in a lab coat.
 
+The EpiphanyAquarium research memory adds a sharper rule: treat spatial queries
+as a demand problem before treating them as an index problem. GigaVoxels uses
+visible rays as the oracle for which bricks deserve high resolution. Wronski fog
+uses the camera froxel volume as the field where sources are injected once and
+sampled many times. Dreams' prototype refined frustum cells, shortened object
+lists as cells split, then switched to per-pixel sorted lists that could truncate
+at the first solid hit.
+
+For `vg_csg`, that translates to consumer-shaped query frontiers:
+
+- dirty brush movement asks for affected brush pairs, not a world rebuild;
+- branch evaluation asks for left/right bounds gates before polygon tests;
+- an editor viewport or tile asks for surfaces that can contribute to the
+  requested output, not every latent overlap in the level;
+- repeated cutters ask for cached pair classifications or brush-frontier batches,
+  not a thousand independent list walks.
+
+This does not outlaw BVHs, grids, or sweep-and-prune. It demotes them. They are
+candidate storage layouts for a demand frontier, not the central idea. The
+central idea is that the request already contains spatial information; make the
+kernel exploit that before building a generic little bureaucracy with boxes.
+
 ### 7. Realtime Means Incremental, Not Global
 
 The public notes frame the algorithm as fast for updating affected brushes, not
@@ -273,8 +295,10 @@ Algorithm migration steps:
 6. Implement boolean branch routing using category list swizzles.
 7. Add bounds early-outs before every expensive classification.
 8. Add dirty-set and touching-brush discovery.
-9. Convert categorized visible polygons to Bevy mesh buffers.
-10. Benchmark global rebuild, affected-brush rebuild, and worst-case overlap
+9. Add a demand-frontier prototype that produces affected brush-pair batches
+   from dirty brushes, branch bounds, and requested output scope.
+10. Convert categorized visible polygons to Bevy mesh buffers.
+11. Benchmark global rebuild, affected-brush rebuild, and worst-case overlap
     scenes before making performance claims.
 
 ## Acceptance Tests To Add
@@ -303,8 +327,10 @@ Algorithm migration steps:
   cut material?
 - Should Bevy output preserve large n-gons for later optimization, or triangulate
   at the boundary immediately?
-- What is the best initial spatial rejection structure after branch bounds:
-  loose grid, BVH, sweep-and-prune, or no extra structure until profiling says
-  the tree culling is insufficient?
+- What is the smallest demand frontier after branch bounds: dirty affected
+  brush pairs, viewport/tile-frontier batches, pair-classification caches, or no
+  extra structure until profiling says tree culling is insufficient?
+- If a frontier needs storage, which layout wins under dirty rebuild timings:
+  loose grid, BVH, sweep-and-prune, pair cache, or sorted frontier batches?
 - How much topology should live in reusable library code versus Bevy ECS
   components?

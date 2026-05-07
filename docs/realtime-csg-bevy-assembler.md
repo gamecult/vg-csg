@@ -162,8 +162,25 @@ or sweep than by carving:
 
 The immediate next upgrade is not "more primitives." It is the category-router
 kernel: split crossing polygons, route classified source polygons through
-boolean branches, preserve material/surface metadata, and then add a BVH or
-spatial hash so cutter cost does not scale like a punishment.
+boolean branches, and preserve material/surface metadata.
+
+The next accelerator should not be a reflexive BVH-shaped apology. The
+EpiphanyAquarium memory points at a stronger pattern from GigaVoxels, froxels,
+and Dreams: let the consumer define the query frontier. For CSG, the consumer is
+not always "the whole scene." It can be the moved brush, the current branch, the
+editor tile, the requested output mesh, or the visible/view-tested surface set.
+So the near-term spatial plan is:
+
+- use branch and brush bounds as semantic gates before cutting;
+- keep dirty/touched brush discovery separate from polygon classification;
+- build affected brush-pair or surface-frontier batches from those gates;
+- measure those batches before adding a generic BVH, loose grid, or spatial
+  hash;
+- only promote an index if it beats the demand-shaped frontier on dirty rebuilds
+  and preserves exact output parity.
+
+Sideways version: do not ask every cutter whether it matters. Ask the branch,
+dirty region, and requested output which pairs deserve to exist this frame.
 
 Performance fixtures live in `docs/research/csg-performance-fixtures.md` and
 `tools/run_csg_perf.ps1`. They time our release fixture now and reserve a JSONL
