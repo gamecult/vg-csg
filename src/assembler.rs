@@ -176,6 +176,10 @@ impl Assembler {
         output
     }
 
+    pub fn rebuild(&self) -> BuildOutput {
+        self.build_uncached()
+    }
+
     fn build_uncached(&self) -> BuildOutput {
         if self
             .compiled
@@ -474,9 +478,10 @@ fn subtract_from_solids(solids: Vec<ConvexSolid>, cutter: &ConvexSolid) -> Vec<C
 fn intersect_solids(solids: Vec<ConvexSolid>, cutter: &ConvexSolid) -> Vec<ConvexSolid> {
     let mut out = Vec::with_capacity(solids.len());
     for solid in solids {
-        if solid.bounds.intersects(cutter.bounds)
-            && let Some(fragment) = solid.intersect_convex_owned(cutter)
-        {
+        if !solid.bounds.intersects(cutter.bounds) {
+            continue;
+        }
+        if let Some(fragment) = solid.intersect_convex_owned(cutter) {
             out.push(fragment);
         }
     }
@@ -586,5 +591,38 @@ mod tests {
         assert_eq!(output.report.emitted_convex_fragments, 1);
         assert_eq!(output.report.warnings.len(), 0);
         assert_eq!(output.mesh.triangle_count(), 12);
+    }
+
+    #[test]
+    fn cached_build_and_dirty_rebuild_emit_same_output() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "slab",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::new(8.0, 8.0, 2.0)),
+            MaterialId(1),
+        );
+        asm.cut_box(
+            "center void",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(2.0)),
+        );
+        asm.cut_oriented_box(
+            "angled void",
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.25, 4.0, 2.5),
+            bevy_math::Quat::from_rotation_z(0.35),
+        );
+
+        let stable = asm.build();
+        let cached = asm.build();
+        let dirty = asm.rebuild();
+
+        assert_eq!(stable.report.emitted_convex_fragments, dirty.report.emitted_convex_fragments);
+        assert_eq!(stable.report.warnings, dirty.report.warnings);
+        assert_eq!(stable.mesh.triangle_count(), dirty.mesh.triangle_count());
+        assert_eq!(stable.mesh.vertex_count(), dirty.mesh.vertex_count());
+        assert_eq!(stable.mesh.positions, dirty.mesh.positions);
+        assert_eq!(stable.mesh.indices, dirty.mesh.indices);
+        assert_eq!(cached.mesh.positions, stable.mesh.positions);
+        assert_eq!(cached.mesh.indices, stable.mesh.indices);
     }
 }

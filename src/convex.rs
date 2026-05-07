@@ -177,6 +177,13 @@ impl ConvexSolid {
     }
 
     pub fn intersect_convex_owned(self, cutter: &Self) -> Option<Self> {
+        if cutter.contains_solid(&self) {
+            return Some(self);
+        }
+        if self.contains_solid(cutter) {
+            return Some(cutter.clone_with_material(self.material));
+        }
+
         let mut remainder = self;
 
         for plane in &cutter.clip_planes {
@@ -188,6 +195,29 @@ impl ConvexSolid {
         }
 
         Some(remainder)
+    }
+
+    pub fn contains_point(&self, point: Vec3) -> bool {
+        self.clip_planes
+            .iter()
+            .all(|plane| plane.signed_distance(point) <= EPSILON)
+    }
+
+    pub fn contains_solid(&self, other: &Self) -> bool {
+        other
+            .polygons
+            .iter()
+            .flat_map(|polygon| polygon.vertices.iter())
+            .all(|point| self.contains_point(*point))
+    }
+
+    pub fn clone_with_material(&self, material: MaterialId) -> Self {
+        let mut solid = self.clone();
+        solid.material = material;
+        for polygon in &mut solid.polygons {
+            polygon.material = material;
+        }
+        solid
     }
 
     pub fn append_to_mesh(&self, mesh: &mut TriangleMesh) {

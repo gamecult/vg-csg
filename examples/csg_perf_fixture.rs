@@ -39,7 +39,8 @@ fn main() {
     ];
 
     for case in cases {
-        run_case(case);
+        run_case(case, PerfMode::Stable);
+        run_case(case, PerfMode::Dirty);
     }
 }
 
@@ -50,13 +51,35 @@ struct PerfCase {
     build: fn() -> Assembler,
 }
 
-fn run_case(case: PerfCase) {
+#[derive(Clone, Copy)]
+enum PerfMode {
+    Stable,
+    Dirty,
+}
+
+impl PerfMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Dirty => "dirty",
+        }
+    }
+
+    fn build(self, assembler: &Assembler) -> vg_csg::BuildOutput {
+        match self {
+            Self::Stable => assembler.build(),
+            Self::Dirty => assembler.rebuild(),
+        }
+    }
+}
+
+fn run_case(case: PerfCase, mode: PerfMode) {
     let assembler = (case.build)();
-    let warmup = assembler.build();
+    let warmup = mode.build(&assembler);
     black_box(warmup.mesh.triangle_count());
 
     for _ in 0..WARMUP_ITERS {
-        let output = assembler.build();
+        let output = mode.build(&assembler);
         black_box(output.mesh.triangle_count());
     }
 
@@ -67,7 +90,7 @@ fn run_case(case: PerfCase) {
 
     for _ in 0..MEASURE_ITERS {
         let start = Instant::now();
-        let output = assembler.build();
+        let output = mode.build(&assembler);
         let elapsed = start.elapsed();
         triangles = output.mesh.triangle_count();
         fragments = output.report.emitted_convex_fragments;
@@ -87,7 +110,8 @@ fn run_case(case: PerfCase) {
     let p95_ns = percentile_ns(&timings, 95);
 
     println!(
-        "{{\"kernel\":\"vg_csg\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{}}}",
+        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{}}}",
+        mode.as_str(),
         case.name,
         case.brushes,
         MEASURE_ITERS,
