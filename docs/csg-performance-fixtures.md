@@ -134,7 +134,9 @@ Mesh reuse seam: incremental rebuilds now keep the previous generation's cached
 mesh and reuse it only when suffix replay proves no geometry was touched. This
 is intentionally exact and conservative: distant rejected edits can skip mesh
 emission, while candidate cuts still emit the full output mesh. The report
-exposes `reused_mesh` so the fixture and tests do not infer reuse from timing.
+exposes `reused_mesh`, `used_checkpoint`, `checkpoint_rebuild_from`, and
+`direct_dirty_rebuild` so the fixture and tests do not infer rebuild strategy
+from timing.
 
 Benchmark correction: `rebuild()` must bypass checkpoint caches. An earlier
 fixture pass accidentally let the dirty box baseline travel through cached box
@@ -217,3 +219,10 @@ replay. The checkpoint path still wins hard for general convex tail edits:
 and `common_box_chain_64` stays far below full dirty rebuild. Rejected general
 convex suffixes can expose `reused_mesh:true`; the fixture includes
 `distant_oriented_cutters_128` for that case.
+
+Planning counters now expose rebuild strategy. Treat `direct_dirty_rebuild:true`
+as a sign the incremental planner deliberately bailed to the direct path.
+Treat `used_checkpoint:true` and `checkpoint_rebuild_from` as evidence of a live
+suffix replay boundary. Treat `reused_mesh:true` as proof that suffix replay did
+not touch geometry and reused the previous output mesh. These fields are part of
+the benchmark contract because timings alone already lied once.

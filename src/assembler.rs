@@ -23,6 +23,9 @@ pub struct BuildReport {
     pub candidate_pairs: usize,
     pub rejected_pairs: usize,
     pub reused_mesh: bool,
+    pub used_checkpoint: bool,
+    pub checkpoint_rebuild_from: Option<usize>,
+    pub direct_dirty_rebuild: bool,
     pub warnings: Vec<BuildWarning>,
 }
 
@@ -442,6 +445,7 @@ impl Assembler {
         for brush in &self.compiled {
             state.apply_compiled_box(brush);
         }
+        state.report.direct_dirty_rebuild = true;
         state.into_output_with_mesh(self.brushes.len(), self.generation, None)
     }
 
@@ -488,6 +492,10 @@ impl Assembler {
         } else {
             (BoxBuildState::default(), 0)
         };
+        if start_index > 0 {
+            state.report.used_checkpoint = true;
+            state.report.checkpoint_rebuild_from = Some(start_index);
+        }
 
         let mut checkpoints = (start_index == 0).then(|| vec![BoxBuildState::default()]);
 
@@ -544,6 +552,10 @@ impl Assembler {
         } else {
             (GeneralBuildState::default(), 0)
         };
+        if start_index > 0 {
+            state.report.used_checkpoint = true;
+            state.report.checkpoint_rebuild_from = Some(start_index);
+        }
 
         let mut checkpoints = (start_index == 0).then(|| vec![GeneralBuildState::default()]);
 
@@ -1300,6 +1312,8 @@ mod tests {
         let incremental = asm.build_incremental();
         let full = asm.rebuild();
 
+        assert!(!incremental.report.used_checkpoint);
+        assert!(incremental.report.direct_dirty_rebuild);
         assert_eq!(incremental.mesh.positions, full.mesh.positions);
         assert_eq!(incremental.mesh.indices, full.mesh.indices);
         assert_eq!(
@@ -1385,6 +1399,9 @@ mod tests {
 
         assert_eq!(after.mesh, before.mesh);
         assert!(after.report.reused_mesh);
+        assert!(after.report.used_checkpoint);
+        assert_eq!(after.report.checkpoint_rebuild_from, Some(1));
+        assert!(!after.report.direct_dirty_rebuild);
         assert_eq!(after.report.candidate_pairs, 0);
         assert_eq!(after.report.rejected_pairs, 1);
     }
@@ -1422,6 +1439,9 @@ mod tests {
         let incremental = asm.build_incremental();
         let full = asm.rebuild();
 
+        assert!(incremental.report.used_checkpoint);
+        assert_eq!(incremental.report.checkpoint_rebuild_from, Some(12));
+        assert!(!incremental.report.direct_dirty_rebuild);
         assert_eq!(incremental.mesh.positions, full.mesh.positions);
         assert_eq!(incremental.mesh.indices, full.mesh.indices);
         assert_eq!(

@@ -116,6 +116,9 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let mut candidate_pairs = 0;
     let mut rejected_pairs = 0;
     let mut reused_mesh = false;
+    let mut used_checkpoint = false;
+    let mut checkpoint_rebuild_from = None::<usize>;
+    let mut direct_dirty_rebuild = false;
 
     for iteration in 0..MEASURE_ITERS {
         let start = Instant::now();
@@ -127,6 +130,9 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         candidate_pairs = output.report.candidate_pairs;
         rejected_pairs = output.report.rejected_pairs;
         reused_mesh = output.report.reused_mesh;
+        used_checkpoint = output.report.used_checkpoint;
+        checkpoint_rebuild_from = output.report.checkpoint_rebuild_from;
+        direct_dirty_rebuild = output.report.direct_dirty_rebuild;
         black_box((
             triangles,
             fragments,
@@ -134,6 +140,9 @@ fn run_case(case: PerfCase, mode: PerfMode) {
             candidate_pairs,
             rejected_pairs,
             reused_mesh,
+            used_checkpoint,
+            checkpoint_rebuild_from,
+            direct_dirty_rebuild,
         ));
         timings.push(elapsed);
     }
@@ -149,7 +158,7 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let p95_ns = percentile_ns(&timings, 95);
 
     println!(
-        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{},\"candidate_pairs\":{},\"rejected_pairs\":{},\"reused_mesh\":{}}}",
+        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{},\"candidate_pairs\":{},\"rejected_pairs\":{},\"reused_mesh\":{},\"used_checkpoint\":{},\"checkpoint_rebuild_from\":{},\"direct_dirty_rebuild\":{}}}",
         mode.as_str(),
         case.name,
         case.brushes,
@@ -165,7 +174,10 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         warnings,
         candidate_pairs,
         rejected_pairs,
-        reused_mesh
+        reused_mesh,
+        used_checkpoint,
+        checkpoint_rebuild_from.map_or_else(|| "null".to_string(), |index| index.to_string()),
+        direct_dirty_rebuild
     );
 }
 
