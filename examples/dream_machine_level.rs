@@ -5,7 +5,7 @@ use std::{
 };
 
 use bevy_math::{Quat, Vec3};
-use vg_csg::{DomeCapZSpec, FloretArmSpec, LevelDsl, MaterialId, TriangleMesh};
+use vg_csg::{DomeCapZSpec, LevelDsl, MaterialId, TriangleMesh};
 
 const FLOOR: MaterialId = MaterialId(1);
 const WALL: MaterialId = MaterialId(2);
@@ -21,10 +21,11 @@ fn main() -> io::Result<()> {
     let mut level = LevelDsl::new();
     add_machine_nave(&mut level);
     add_anchor_city(&mut level);
-    add_radial_petals(&mut level);
+    add_petal_hinges(&mut level);
     add_service_arteries(&mut level);
 
-    let output = level.assemble();
+    let mut output = level.assemble();
+    append_curved_ray_florets(&mut output.mesh);
     let out_dir = output_dir();
     fs::create_dir_all(&out_dir)?;
     write_obj_bundle(&out_dir, "dream_machine_level", &output.mesh)?;
@@ -54,16 +55,26 @@ fn main() -> io::Result<()> {
 }
 
 fn add_machine_nave(level: &mut LevelDsl) {
-    level.solid_box(
-        "machine nave foundation",
-        Vec3::new(0.0, 0.0, -0.35),
-        Vec3::new(70.0, 42.0, 0.7),
+    level.cylinder_z(
+        "round machine garden foundation",
+        Vec3::new(0.0, 0.0, -0.22),
+        26.0,
+        0.44,
+        96,
         FLOOR,
+    );
+    level.cylinder_z(
+        "inner raised city terrace",
+        Vec3::new(0.0, 0.0, 0.08),
+        19.0,
+        0.34,
+        96,
+        WALL,
     );
     level.solid_box(
         "central reactor plinth",
-        Vec3::new(0.0, 0.0, 0.35),
-        Vec3::new(15.0, 15.0, 0.7),
+        Vec3::new(0.0, 0.0, 0.45),
+        Vec3::new(13.0, 13.0, 0.9),
         MACHINE,
     );
     level.cylinder_z(
@@ -86,50 +97,30 @@ fn add_machine_nave(level: &mut LevelDsl) {
         },
     );
 
-    for side in [-1.0_f32, 1.0] {
-        level.solid_box(
-            format!("long retaining wall {side}"),
-            Vec3::new(0.0, side * 21.0, 2.0),
-            Vec3::new(70.0, 1.0, 4.0),
-            WALL,
-        );
-        level.cut_box(
-            format!("service arcade cut {side}"),
-            Vec3::new(0.0, side * 21.0, 1.6),
-            Vec3::new(54.0, 1.4, 2.6),
-        );
-    }
-
-    for index in 0..18 {
-        let x = -32.0 + index as f32 * 3.8;
-        let angle = if index % 2 == 0 { 0.42 } else { -0.42 };
+    for index in 0..16 {
+        let angle = index as f32 * std::f32::consts::TAU / 16.0;
+        let radial = Vec3::new(angle.cos(), angle.sin(), 0.0);
         level.cut_oriented_box(
             format!("diagonal vent throat {index}"),
-            Vec3::new(x, 0.0, 0.25),
-            Vec3::new(0.8, 35.0, 2.0),
-            Quat::from_rotation_z(angle),
-        );
-    }
-
-    for index in 0..9 {
-        let x = -30.0 + index as f32 * 7.5;
-        level.solid_box(
-            format!("overhead rib {index}"),
-            Vec3::new(x, 0.0, 5.2),
-            Vec3::new(0.8, 43.5, 1.0),
-            MACHINE,
+            radial * 17.5 + Vec3::new(0.0, 0.0, 0.24),
+            Vec3::new(1.1, 15.0, 1.5),
+            Quat::from_rotation_z(angle + 0.55),
         );
     }
 }
 
 fn add_anchor_city(level: &mut LevelDsl) {
-    for ring in 0..5 {
-        let radius = 13.5 + ring as f32 * 3.2;
-        let blocks = 10 + ring * 6;
-        let height_base = 6.5 - ring as f32 * 0.95;
-        let mat = if ring < 2 {
+    for ring in 0..4 {
+        let radius = 11.8 + ring as f32 * 3.0;
+        let blocks = 8 + ring * 8;
+        let height_base = if ring == 0 {
+            5.8
+        } else {
+            4.4 - ring as f32 * 0.65
+        };
+        let mat = if ring == 0 {
             TOWER
-        } else if ring == 3 {
+        } else if ring == 2 {
             PARK
         } else {
             WALL
@@ -142,8 +133,8 @@ fn add_anchor_city(level: &mut LevelDsl) {
             let radial = Vec3::new(angle.cos(), angle.sin(), 0.0);
             let tangent_angle = angle + std::f32::consts::FRAC_PI_2;
             let center = radial * (radius + jitter * 0.55);
-            let footprint = Vec3::new(1.4 + jitter.abs() * 0.8, 1.0 + ring as f32 * 0.15, 1.0);
-            let height = (height_base + jitter * 2.1).max(1.2);
+            let footprint = Vec3::new(1.05 + jitter.abs() * 0.65, 0.85 + ring as f32 * 0.12, 1.0);
+            let height = (height_base + jitter * 1.5).max(0.55);
 
             level.solid_oriented_box(
                 format!("anchor city block r{ring} b{index}"),
@@ -160,67 +151,191 @@ fn add_anchor_city(level: &mut LevelDsl) {
         let radial = Vec3::new(angle.cos(), angle.sin(), 0.0);
         level.solid_oriented_box(
             format!("anchor plaza spoke {index}"),
-            radial * 17.0 + Vec3::new(0.0, 0.0, 0.08),
-            Vec3::new(18.0, 0.45, 0.16),
+            radial * 14.5 + Vec3::new(0.0, 0.0, 0.34),
+            Vec3::new(12.0, 0.34, 0.12),
             Quat::from_rotation_z(angle),
             LIGHT,
         );
     }
 }
 
-fn add_radial_petals(level: &mut LevelDsl) {
-    for index in 0..24 {
-        let angle = index as f32 * std::f32::consts::TAU / 24.0;
+fn add_petal_hinges(level: &mut LevelDsl) {
+    for index in 0..18 {
+        let angle = index as f32 * std::f32::consts::TAU / 18.0;
+        let direction = Vec3::new(angle.cos(), angle.sin(), 0.0);
+        level.solid_oriented_box(
+            format!("petal hinge spine {index}"),
+            direction * 28.0 + Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(5.0, 0.55, 1.2),
+            Quat::from_rotation_z(angle),
+            MACHINE,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CurvedPanelSpec {
+    anchor: Vec3,
+    direction: Vec3,
+    length: f32,
+    root_width: f32,
+    tip_width: f32,
+    thickness: f32,
+    lift: f32,
+    bend: f32,
+    segments: usize,
+    material: MaterialId,
+}
+
+fn append_curved_ray_florets(mesh: &mut TriangleMesh) {
+    for index in 0..18 {
+        let angle = index as f32 * std::f32::consts::TAU / 18.0;
         let direction = Vec3::new(angle.cos(), angle.sin(), 0.0);
         let material = if index % 2 == 0 { SOLAR } else { RADIATOR };
-        let length = if index % 3 == 0 { 58.0 } else { 44.0 };
-        let lift = if index % 2 == 0 { 2.8 } else { 1.4 };
-        level.floret_arm(
-            format!("citadel-scale ray floret {index}"),
-            FloretArmSpec {
-                anchor: direction * 22.0 + Vec3::Z * 0.4,
+        append_curved_panel(
+            mesh,
+            CurvedPanelSpec {
+                anchor: direction * 29.0 + Vec3::Z * 0.58,
                 direction,
-                length,
-                root_width: 3.0,
-                tip_width: 9.0,
+                length: if index % 3 == 0 { 74.0 } else { 58.0 },
+                root_width: 5.2,
+                tip_width: 16.5,
                 thickness: 0.16,
-                tip_lift: lift,
+                lift: if index % 2 == 0 { 7.0 } else { 4.4 },
+                bend: if index % 2 == 0 { 7.5 } else { -5.5 },
+                segments: 9,
                 material,
             },
         );
     }
 }
 
-fn add_service_arteries(level: &mut LevelDsl) {
-    for index in 0..16 {
-        let angle = index as f32 * std::f32::consts::TAU / 16.0;
-        let radius = 24.0 + (index % 4) as f32 * 4.0;
-        let center_angle = angle + 0.38;
-        let center = Vec3::new(
-            center_angle.cos() * radius,
-            center_angle.sin() * radius,
-            1.1,
-        );
-        let length = 21.0 + (index % 3) as f32 * 5.0;
-        let width = if index % 2 == 0 { 0.7 } else { 1.05 };
-        let material = if index % 2 == 0 { MACHINE } else { LIGHT };
+fn append_curved_panel(mesh: &mut TriangleMesh, spec: CurvedPanelSpec) {
+    let forward = spec.direction.normalize_or_zero();
+    let forward = if forward.length_squared() == 0.0 {
+        Vec3::X
+    } else {
+        forward
+    };
+    let mut side = forward.cross(Vec3::Z).normalize_or_zero();
+    if side.length_squared() == 0.0 {
+        side = Vec3::Y;
+    }
 
-        level.solid_oriented_box(
-            format!("looping cargo artery {index}"),
-            center,
-            Vec3::new(length, width, 0.55),
-            Quat::from_rotation_z(angle + 0.95),
-            material,
+    let segments = spec.segments.max(2);
+    let mut left_top = Vec::with_capacity(segments + 1);
+    let mut right_top = Vec::with_capacity(segments + 1);
+    let mut left_bottom = Vec::with_capacity(segments + 1);
+    let mut right_bottom = Vec::with_capacity(segments + 1);
+    let half_thickness = Vec3::Z * (spec.thickness * 0.5);
+
+    for index in 0..=segments {
+        let t = index as f32 / segments as f32;
+        let smooth_t = t * t * (3.0 - 2.0 * t);
+        let width = spec.root_width + (spec.tip_width - spec.root_width) * smooth_t;
+        let center = spec.anchor
+            + forward * (spec.length * t)
+            + side * (spec.bend * t * (1.0 - t))
+            + Vec3::Z * (spec.lift * smooth_t);
+        let half_width = side * (width * 0.5);
+        left_top.push(center - half_width + half_thickness);
+        right_top.push(center + half_width + half_thickness);
+        left_bottom.push(center - half_width - half_thickness);
+        right_bottom.push(center + half_width - half_thickness);
+    }
+
+    for index in 0..segments {
+        mesh.append_quad(
+            [
+                left_top[index],
+                right_top[index],
+                right_top[index + 1],
+                left_top[index + 1],
+            ],
+            Vec3::Z,
+            spec.material,
+        );
+        mesh.append_quad(
+            [
+                left_bottom[index],
+                left_bottom[index + 1],
+                right_bottom[index + 1],
+                right_bottom[index],
+            ],
+            Vec3::NEG_Z,
+            spec.material,
+        );
+        mesh.append_quad(
+            [
+                left_bottom[index],
+                left_top[index],
+                left_top[index + 1],
+                left_bottom[index + 1],
+            ],
+            -side,
+            spec.material,
+        );
+        mesh.append_quad(
+            [
+                right_bottom[index],
+                right_bottom[index + 1],
+                right_top[index + 1],
+                right_top[index],
+            ],
+            side,
+            spec.material,
         );
     }
 
-    for index in 0..10 {
-        let angle = index as f32 * std::f32::consts::TAU / 10.0 + 0.18;
+    mesh.append_quad(
+        [left_bottom[0], right_bottom[0], right_top[0], left_top[0]],
+        -forward,
+        spec.material,
+    );
+    mesh.append_quad(
+        [
+            left_bottom[segments],
+            left_top[segments],
+            right_top[segments],
+            right_bottom[segments],
+        ],
+        forward,
+        spec.material,
+    );
+}
+
+fn add_service_arteries(level: &mut LevelDsl) {
+    for ring in 0..3 {
+        let segments = 18 + ring * 6;
+        let radius = 23.0 + ring as f32 * 4.8;
+        for index in 0..segments {
+            if (index + ring) % 3 == 0 {
+                continue;
+            }
+            let angle = index as f32 * std::f32::consts::TAU / segments as f32;
+            let tangent = angle + std::f32::consts::FRAC_PI_2;
+            let center = Vec3::new(angle.cos() * radius, angle.sin() * radius, 0.92);
+            let length = std::f32::consts::TAU * radius / segments as f32 * 0.82;
+            let material = if ring == 1 { LIGHT } else { MACHINE };
+
+            level.solid_oriented_box(
+                format!("orbiting cargo artery r{ring} s{index}"),
+                center,
+                Vec3::new(length, 0.52, 0.36),
+                Quat::from_rotation_z(tangent),
+                material,
+            );
+        }
+    }
+
+    for index in 0..18 {
+        let angle = index as f32 * std::f32::consts::TAU / 18.0 + 0.18;
         let radial = Vec3::new(angle.cos(), angle.sin(), 0.0);
-        level.solid_box(
+        level.solid_oriented_box(
             format!("outer machine pier {index}"),
-            radial * 38.0 + Vec3::new(0.0, 0.0, 1.4),
-            Vec3::new(1.1, 1.1, 2.8),
+            radial * 26.0 + Vec3::new(0.0, 0.0, 1.05),
+            Vec3::new(2.0, 0.65, 2.1),
+            Quat::from_rotation_z(angle),
             MACHINE,
         );
     }
