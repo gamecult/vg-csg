@@ -17,6 +17,7 @@ The script builds `vg_csg` in release mode and writes JSONL to
 - warmup and measured iteration counts
 - `mean_ns`, `min_ns`, `p50_ns`, `p95_ns`, `max_ns`
 - emitted triangle, fragment, and warning counts
+- demand-frontier `candidate_pairs` and `rejected_pairs`
 
 The `vg_csg` fixture measures the stable-tree path after warmup. `Assembler`
 caches evaluated output by generation, so repeated `build()` calls on an
@@ -85,9 +86,18 @@ inside/outside/aligned/reverse-aligned categories, crossing polygon splits, and
 logical routing tables. Use it as readable doctrine. Use the native bridge as
 the performance target.
 
+`vg_csg` now reports the first demand-frontier counters. These are not yet a
+new kernel path; they expose the ordered brush stream as affected source/operator
+pairs and rejected bounds pairs so future router/index work can prove it is
+refusing real work rather than merely rearranging it.
+
 ## Latest Local Baseline
 
 Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
+
+This baseline predates the `candidate_pairs`/`rejected_pairs` fields. New
+fixture runs include them; keep the old block until a fresh C++ comparison is
+captured rather than mixing timing environments.
 
 ```jsonl
 {"kernel":"vg_csg","mode":"stable","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":948,"min_ns":800,"p50_ns":900,"p95_ns":1100,"max_ns":1200,"triangles":72,"fragments":6,"warnings":0}

@@ -10,6 +10,7 @@ mod assembler;
 mod brush;
 mod convex;
 mod dsl;
+mod frontier;
 mod mesh;
 mod primitives;
 mod tree;
@@ -18,6 +19,7 @@ pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
 pub use convex::{CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane};
 pub use dsl::LevelDsl;
+pub use frontier::{DemandFrontier, DemandPair};
 pub use mesh::TriangleMesh;
 pub use primitives::{
     DomeCapZSpec, FloretArmSpec, append_cylinder_z, append_dome_cap_z, append_floret_arm,

@@ -18,6 +18,9 @@ pub enum BuildWarning {
 pub struct BuildReport {
     pub input_brushes: usize,
     pub emitted_convex_fragments: usize,
+    pub operator_brushes: usize,
+    pub candidate_pairs: usize,
+    pub rejected_pairs: usize,
     pub warnings: Vec<BuildWarning>,
 }
 
@@ -256,38 +259,49 @@ impl Assembler {
                     ),
                 },
                 BrushOp::Subtract => {
+                    report.operator_brushes += 1;
                     if !brush
                         .bounds
                         .intersects_any(solids.iter().map(|solid| solid.bounds))
                     {
+                        report.rejected_pairs += solids.len();
                         continue;
                     }
                     if let Some(cutter) = brush.convex_cutter() {
-                        solids = subtract_from_solids(solids, &cutter);
+                        solids = subtract_from_solids(solids, &cutter, &mut report);
                     } else {
-                        report
-                            .warnings
-                            .push(BuildWarning::SubtractIgnoredForNonBox {
-                                brush: brush.name.clone(),
-                            });
+                        let has_candidate = record_solid_pairs(&solids, brush.bounds, &mut report);
+                        if has_candidate {
+                            report
+                                .warnings
+                                .push(BuildWarning::SubtractIgnoredForNonBox {
+                                    brush: brush.name.clone(),
+                                });
+                        }
                     }
                 }
                 BrushOp::Intersect => {
+                    report.operator_brushes += 1;
                     if !brush
                         .bounds
                         .intersects_any(solids.iter().map(|solid| solid.bounds))
                     {
+                        report.rejected_pairs += solids.len();
                         solids.clear();
                         continue;
                     }
                     if let Some(cutter) = brush.convex_cutter() {
-                        solids = intersect_solids(solids, &cutter);
+                        solids = intersect_solids(solids, &cutter, &mut report);
                     } else {
-                        report
-                            .warnings
-                            .push(BuildWarning::IntersectIgnoredForNonBox {
-                                brush: brush.name.clone(),
-                            });
+                        let has_candidate = record_solid_pairs(&solids, brush.bounds, &mut report);
+                        solids.clear();
+                        if has_candidate {
+                            report
+                                .warnings
+                                .push(BuildWarning::IntersectIgnoredForNonBox {
+                                    brush: brush.name.clone(),
+                                });
+                        }
                     }
                 }
             }
@@ -319,12 +333,15 @@ impl Assembler {
             match brush.op {
                 BrushOp::Add => boxes.push((bounds, brush.material)),
                 BrushOp::Subtract => {
+                    report.operator_brushes += 1;
                     if !bounds.intersects_any(boxes.iter().map(|(bounds, _)| *bounds)) {
+                        report.rejected_pairs += boxes.len();
                         continue;
                     }
                     let mut out = Vec::with_capacity(boxes.len() + 4);
                     for (solid, material) in boxes {
                         if solid.intersects(bounds) {
+                            report.candidate_pairs += 1;
                             out.extend(
                                 solid
                                     .subtract_box(bounds)
@@ -332,20 +349,29 @@ impl Assembler {
                                     .map(|piece| (piece, material)),
                             );
                         } else {
+                            report.rejected_pairs += 1;
                             out.push((solid, material));
                         }
                     }
                     boxes = out;
                 }
                 BrushOp::Intersect => {
+                    report.operator_brushes += 1;
                     if !bounds.intersects_any(boxes.iter().map(|(bounds, _)| *bounds)) {
+                        report.rejected_pairs += boxes.len();
                         boxes.clear();
                         continue;
                     }
                     boxes = boxes
                         .into_iter()
                         .filter_map(|(solid, material)| {
-                            solid.intersection(bounds).map(|hit| (hit, material))
+                            if let Some(hit) = solid.intersection(bounds) {
+                                report.candidate_pairs += 1;
+                                Some((hit, material))
+                            } else {
+                                report.rejected_pairs += 1;
+                                None
+                            }
                         })
                         .collect();
                 }
@@ -463,29 +489,54 @@ impl CompiledBrush {
     }
 }
 
-fn subtract_from_solids(solids: Vec<ConvexSolid>, cutter: &ConvexSolid) -> Vec<ConvexSolid> {
+fn subtract_from_solids(
+    solids: Vec<ConvexSolid>,
+    cutter: &ConvexSolid,
+    report: &mut BuildReport,
+) -> Vec<ConvexSolid> {
     let mut out = Vec::with_capacity(solids.len() + 4);
     for solid in solids {
         if solid.bounds.intersects(cutter.bounds) {
+            report.candidate_pairs += 1;
             out.extend(solid.subtract_convex_owned(cutter));
         } else {
+            report.rejected_pairs += 1;
             out.push(solid);
         }
     }
     out
 }
 
-fn intersect_solids(solids: Vec<ConvexSolid>, cutter: &ConvexSolid) -> Vec<ConvexSolid> {
+fn intersect_solids(
+    solids: Vec<ConvexSolid>,
+    cutter: &ConvexSolid,
+    report: &mut BuildReport,
+) -> Vec<ConvexSolid> {
     let mut out = Vec::with_capacity(solids.len());
     for solid in solids {
         if !solid.bounds.intersects(cutter.bounds) {
+            report.rejected_pairs += 1;
             continue;
         }
+        report.candidate_pairs += 1;
         if let Some(fragment) = solid.intersect_convex_owned(cutter) {
             out.push(fragment);
         }
     }
     out
+}
+
+fn record_solid_pairs(solids: &[ConvexSolid], bounds: Aabb, report: &mut BuildReport) -> bool {
+    let mut has_candidate = false;
+    for solid in solids {
+        if solid.bounds.intersects(bounds) {
+            report.candidate_pairs += 1;
+            has_candidate = true;
+        } else {
+            report.rejected_pairs += 1;
+        }
+    }
+    has_candidate
 }
 
 #[cfg(test)]
@@ -567,6 +618,9 @@ mod tests {
 
         let output = asm.build();
         assert_eq!(output.report.emitted_convex_fragments, 1);
+        assert_eq!(output.report.operator_brushes, 1);
+        assert_eq!(output.report.candidate_pairs, 0);
+        assert_eq!(output.report.rejected_pairs, 1);
         assert_eq!(output.mesh.triangle_count(), 12);
     }
 
@@ -589,6 +643,9 @@ mod tests {
 
         let output = asm.build();
         assert_eq!(output.report.emitted_convex_fragments, 1);
+        assert_eq!(output.report.operator_brushes, 1);
+        assert_eq!(output.report.candidate_pairs, 1);
+        assert_eq!(output.report.rejected_pairs, 0);
         assert_eq!(output.report.warnings.len(), 0);
         assert_eq!(output.mesh.triangle_count(), 12);
     }
@@ -616,7 +673,16 @@ mod tests {
         let cached = asm.build();
         let dirty = asm.rebuild();
 
-        assert_eq!(stable.report.emitted_convex_fragments, dirty.report.emitted_convex_fragments);
+        assert_eq!(
+            stable.report.emitted_convex_fragments,
+            dirty.report.emitted_convex_fragments
+        );
+        assert_eq!(
+            stable.report.operator_brushes,
+            dirty.report.operator_brushes
+        );
+        assert_eq!(stable.report.candidate_pairs, dirty.report.candidate_pairs);
+        assert_eq!(stable.report.rejected_pairs, dirty.report.rejected_pairs);
         assert_eq!(stable.report.warnings, dirty.report.warnings);
         assert_eq!(stable.mesh.triangle_count(), dirty.mesh.triangle_count());
         assert_eq!(stable.mesh.vertex_count(), dirty.mesh.vertex_count());

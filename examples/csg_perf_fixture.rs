@@ -87,6 +87,8 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let mut triangles = 0;
     let mut fragments = 0;
     let mut warnings = 0;
+    let mut candidate_pairs = 0;
+    let mut rejected_pairs = 0;
 
     for _ in 0..MEASURE_ITERS {
         let start = Instant::now();
@@ -95,7 +97,15 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         triangles = output.mesh.triangle_count();
         fragments = output.report.emitted_convex_fragments;
         warnings = output.report.warnings.len();
-        black_box((triangles, fragments, warnings));
+        candidate_pairs = output.report.candidate_pairs;
+        rejected_pairs = output.report.rejected_pairs;
+        black_box((
+            triangles,
+            fragments,
+            warnings,
+            candidate_pairs,
+            rejected_pairs,
+        ));
         timings.push(elapsed);
     }
 
@@ -110,7 +120,7 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let p95_ns = percentile_ns(&timings, 95);
 
     println!(
-        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{}}}",
+        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{},\"candidate_pairs\":{},\"rejected_pairs\":{}}}",
         mode.as_str(),
         case.name,
         case.brushes,
@@ -123,7 +133,9 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         max_ns,
         triangles,
         fragments,
-        warnings
+        warnings,
+        candidate_pairs,
+        rejected_pairs
     );
 }
 
