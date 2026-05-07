@@ -3,8 +3,9 @@ use std::cell::RefCell;
 use bevy_math::Vec3;
 
 use crate::{
-    Aabb, Brush, BrushId, BrushOp, ConvexPolygon, ConvexSolid, MaterialId, PolygonRouteScratch,
-    Primitive, TriangleMesh, append_cylinder_z, append_dome_cap_z, append_floret_arm,
+    Aabb, Brush, BrushId, BrushOp, ConvexPolygon, ConvexSolid, DirtyDemandFrontier, MaterialId,
+    PolygonRouteScratch, Primitive, TriangleMesh, append_cylinder_z, append_dome_cap_z,
+    append_floret_arm,
     primitives::{DomeCapZSpec, FloretArmSpec},
 };
 
@@ -90,6 +91,28 @@ impl Assembler {
         self.generation
     }
 
+    pub fn brush_index(&self, id: BrushId) -> Option<usize> {
+        self.brushes.iter().position(|brush| brush.id == id)
+    }
+
+    pub fn dirty_frontier_for_indices(
+        &self,
+        dirty_indices: impl IntoIterator<Item = usize>,
+    ) -> DirtyDemandFrontier {
+        DirtyDemandFrontier::from_dirty_indices(&self.brushes, dirty_indices)
+    }
+
+    pub fn dirty_frontier_for_brushes(
+        &self,
+        dirty_brushes: impl IntoIterator<Item = BrushId>,
+    ) -> DirtyDemandFrontier {
+        let indices = dirty_brushes
+            .into_iter()
+            .filter_map(|id| self.brush_index(id))
+            .collect::<Vec<_>>();
+        self.dirty_frontier_for_indices(indices)
+    }
+
     pub fn add_brush(
         &mut self,
         name: impl Into<String>,
@@ -105,6 +128,30 @@ impl Assembler {
         self.generation = self.generation.wrapping_add(1);
         self.cache.borrow_mut().take();
         id
+    }
+
+    pub fn set_brush_primitive(&mut self, id: BrushId, primitive: Primitive) -> bool {
+        let Some(index) = self.brush_index(id) else {
+            return false;
+        };
+        self.brushes[index].primitive = primitive;
+        self.brushes[index].set_dirty();
+        self.compiled[index] = CompiledBrush::from_brush(&self.brushes[index]);
+        self.generation = self.generation.wrapping_add(1);
+        self.cache.borrow_mut().take();
+        true
+    }
+
+    pub fn set_brush_op(&mut self, id: BrushId, op: BrushOp) -> bool {
+        let Some(index) = self.brush_index(id) else {
+            return false;
+        };
+        self.brushes[index].op = op;
+        self.brushes[index].set_dirty();
+        self.compiled[index] = CompiledBrush::from_brush(&self.brushes[index]);
+        self.generation = self.generation.wrapping_add(1);
+        self.cache.borrow_mut().take();
+        true
     }
 
     pub fn solid_box(
@@ -907,6 +954,59 @@ mod tests {
         assert_eq!(routed.mesh.triangle_count(), stable.mesh.triangle_count());
         assert_eq!(routed.mesh.positions, stable.mesh.positions);
         assert_eq!(routed.mesh.indices, stable.mesh.indices);
+    }
+
+    #[test]
+    fn mutating_brush_primitive_invalidates_cache_and_exposes_dirty_frontier() {
+        let mut asm = Assembler::new();
+        let source = asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        let cutter = asm.cut_box("void", Aabb::from_center_size(Vec3::ZERO, Vec3::splat(1.0)));
+        let before = asm.build();
+
+        assert!(asm.set_brush_primitive(
+            cutter,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::ZERO, Vec3::splat(2.0)),
+            },
+        ));
+        let frontier = asm.dirty_frontier_for_brushes([cutter]);
+        let after = asm.build();
+
+        assert_eq!(frontier.first_dirty_index, Some(1));
+        assert_eq!(frontier.operator_brushes, 1);
+        assert_eq!(frontier.candidate_pairs(), 1);
+        assert_eq!(frontier.rejected_pairs, 0);
+        assert!(after.generation > before.generation);
+        assert_ne!(after.mesh.positions, before.mesh.positions);
+        assert_eq!(asm.brush_index(source), Some(0));
+        assert_eq!(asm.brush_index(cutter), Some(1));
+    }
+
+    #[test]
+    fn mutating_brush_operation_changes_ordered_output() {
+        let mut asm = Assembler::new();
+        let _source = asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        let other = asm.solid_box(
+            "other",
+            Aabb::from_center_size(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(3.0)),
+            MaterialId(1),
+        );
+        let before = asm.rebuild();
+
+        assert!(asm.set_brush_op(other, BrushOp::Intersect));
+        let after = asm.rebuild();
+
+        assert_eq!(after.report.operator_brushes, 1);
+        assert_eq!(after.report.candidate_pairs, 1);
+        assert!(after.mesh.triangle_count() < before.mesh.triangle_count());
     }
 
     #[test]

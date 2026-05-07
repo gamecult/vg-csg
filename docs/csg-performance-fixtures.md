@@ -115,6 +115,13 @@ Dense-kernel regression guardrail: `rotated_cut_stack_64` is pinned by tests at
 This protects against "optimizations" that alter ordered CSG semantics while
 looking faster. Output-contract changes need to be explicit.
 
+Realtime editing seam: `Assembler` can now mutate brush primitives and
+operations by `BrushId`, invalidating cached output and incrementing generation.
+`DirtyDemandFrontier` computes the conservative ordered suffix after the first
+dirty brush. The prefix before that index is the cacheable region; the suffix is
+the live region because ordered CSG decisions propagate forward. This is still a
+planning surface, not an incremental mesh rebuild yet.
+
 ## Latest Local Baseline
 
 Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
