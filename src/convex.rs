@@ -89,6 +89,13 @@ pub struct CategorizedPolygons {
     pub reverse_aligned: Vec<ConvexPolygon>,
 }
 
+#[derive(Default)]
+pub struct PolygonRouteScratch {
+    pieces: Vec<CategorizationPiece>,
+    inside_pieces: Vec<CategorizationPiece>,
+    cap_points: Vec<Vec3>,
+}
+
 impl ConvexSolid {
     pub fn from_aabb(bounds: Aabb, material: MaterialId) -> Self {
         Self::box_from_center_size(bounds.center(), bounds.size(), Quat::IDENTITY, material)
@@ -256,14 +263,14 @@ impl ConvexSolid {
     }
 
     pub fn categorize_polygons_against(&self, cutter: &Self) -> CategorizedPolygons {
-        categorize_polygon_list_against(&self.polygons, cutter)
+        PolygonRouteScratch::default().categorize_against(&self.polygons, cutter)
     }
 
     pub fn route_polygons_outside_of(
         polygons: Vec<ConvexPolygon>,
         cutter: &Self,
     ) -> Vec<ConvexPolygon> {
-        let categorized = categorize_polygon_list_against(&polygons, cutter);
+        let categorized = PolygonRouteScratch::default().categorize_against(&polygons, cutter);
         categorized.outside
     }
 
@@ -271,7 +278,7 @@ impl ConvexSolid {
         polygons: Vec<ConvexPolygon>,
         cutter: &Self,
     ) -> Vec<ConvexPolygon> {
-        let categorized = categorize_polygon_list_against(&polygons, cutter);
+        let categorized = PolygonRouteScratch::default().categorize_against(&polygons, cutter);
         let mut inside = categorized.inside;
         inside.extend(categorized.aligned);
         inside.extend(categorized.reverse_aligned);
@@ -384,38 +391,68 @@ impl ConvexSolid {
     }
 }
 
-fn categorize_polygon_list_against(
-    polygons: &[ConvexPolygon],
-    cutter: &ConvexSolid,
-) -> CategorizedPolygons {
-    let mut categorized = CategorizedPolygons::default();
+impl PolygonRouteScratch {
+    pub fn categorize_against(
+        &mut self,
+        polygons: &[ConvexPolygon],
+        cutter: &ConvexSolid,
+    ) -> CategorizedPolygons {
+        let mut categorized = CategorizedPolygons::default();
 
-    for polygon in polygons {
-        let mut pieces = vec![CategorizationPiece {
-            polygon: polygon.clone(),
-            aligned_category: None,
-        }];
+        for polygon in polygons {
+            self.pieces.clear();
+            self.pieces.push(CategorizationPiece {
+                polygon: polygon.clone(),
+                aligned_category: None,
+            });
 
-        for plane in &cutter.clip_planes {
-            let mut inside_pieces = Vec::new();
-            for piece in pieces {
-                classify_piece_against_plane(piece, *plane, &mut inside_pieces, &mut categorized);
-            }
-            pieces = inside_pieces;
-        }
-
-        for piece in pieces {
-            match piece.aligned_category {
-                Some(PolygonCategory::Aligned) => categorized.aligned.push(piece.polygon),
-                Some(PolygonCategory::ReverseAligned) => {
-                    categorized.reverse_aligned.push(piece.polygon);
+            for plane in &cutter.clip_planes {
+                self.inside_pieces.clear();
+                for piece in self.pieces.drain(..) {
+                    classify_piece_against_plane(
+                        piece,
+                        *plane,
+                        &mut self.inside_pieces,
+                        &mut categorized,
+                        &mut self.cap_points,
+                    );
                 }
-                _ => categorized.inside.push(piece.polygon),
+                std::mem::swap(&mut self.pieces, &mut self.inside_pieces);
+            }
+
+            for piece in self.pieces.drain(..) {
+                match piece.aligned_category {
+                    Some(PolygonCategory::Aligned) => categorized.aligned.push(piece.polygon),
+                    Some(PolygonCategory::ReverseAligned) => {
+                        categorized.reverse_aligned.push(piece.polygon);
+                    }
+                    _ => categorized.inside.push(piece.polygon),
+                }
             }
         }
+
+        categorized
     }
 
-    categorized
+    pub fn route_outside_of(
+        &mut self,
+        polygons: Vec<ConvexPolygon>,
+        cutter: &ConvexSolid,
+    ) -> Vec<ConvexPolygon> {
+        self.categorize_against(&polygons, cutter).outside
+    }
+
+    pub fn route_inside_of(
+        &mut self,
+        polygons: Vec<ConvexPolygon>,
+        cutter: &ConvexSolid,
+    ) -> Vec<ConvexPolygon> {
+        let categorized = self.categorize_against(&polygons, cutter);
+        let mut inside = categorized.inside;
+        inside.extend(categorized.aligned);
+        inside.extend(categorized.reverse_aligned);
+        inside
+    }
 }
 
 enum SplitResult {
@@ -444,6 +481,7 @@ fn classify_piece_against_plane(
     plane: Plane,
     inside_pieces: &mut Vec<CategorizationPiece>,
     categorized: &mut CategorizedPolygons,
+    cap_points: &mut Vec<Vec3>,
 ) {
     let piece_plane = piece
         .polygon
@@ -477,25 +515,15 @@ fn classify_piece_against_plane(
         }
         (false, true) | (false, false) => inside_pieces.push(piece),
         (true, true) => {
-            let mut cap_points = Vec::new();
-            let outside = clip_polygon(
-                &piece.polygon.vertices,
-                plane,
-                KeepSide::Front,
-                &mut cap_points,
-            );
+            cap_points.clear();
+            let outside = clip_polygon(&piece.polygon.vertices, plane, KeepSide::Front, cap_points);
             if outside.len() >= 3 {
                 let mut outside_polygon = piece.polygon.with_vertices(outside);
                 outside_polygon.category = PolygonCategory::Outside;
                 categorized.outside.push(outside_polygon);
             }
 
-            let inside = clip_polygon(
-                &piece.polygon.vertices,
-                plane,
-                KeepSide::Back,
-                &mut cap_points,
-            );
+            let inside = clip_polygon(&piece.polygon.vertices, plane, KeepSide::Back, cap_points);
             if inside.len() >= 3 {
                 inside_pieces.push(CategorizationPiece {
                     polygon: piece.polygon.with_vertices(inside),

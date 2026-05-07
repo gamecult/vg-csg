@@ -3,8 +3,8 @@ use std::cell::RefCell;
 use bevy_math::Vec3;
 
 use crate::{
-    Aabb, Brush, BrushId, BrushOp, ConvexPolygon, ConvexSolid, MaterialId, Primitive, TriangleMesh,
-    append_cylinder_z, append_dome_cap_z, append_floret_arm,
+    Aabb, Brush, BrushId, BrushOp, ConvexPolygon, ConvexSolid, MaterialId, PolygonRouteScratch,
+    Primitive, TriangleMesh, append_cylinder_z, append_dome_cap_z, append_floret_arm,
     primitives::{DomeCapZSpec, FloretArmSpec},
 };
 
@@ -204,6 +204,7 @@ impl Assembler {
         let mut source = None::<ConvexSolid>;
         let mut surfaces = Vec::<ConvexPolygon>::new();
         let mut previous_cutters = Vec::<ConvexSolid>::new();
+        let mut scratch = PolygonRouteScratch::default();
 
         for brush in &self.compiled {
             match brush.op {
@@ -224,14 +225,11 @@ impl Assembler {
                     }
                     let cutter = brush.convex_cutter()?;
                     report.candidate_pairs += 1;
-                    surfaces = ConvexSolid::route_polygons_outside_of(surfaces, &cutter);
+                    surfaces = scratch.route_outside_of(surfaces, &cutter);
 
-                    let mut caps = ConvexSolid::route_polygons_inside_of(
-                        cutter.polygons.clone(),
-                        source_solid,
-                    );
+                    let mut caps = scratch.route_inside_of(cutter.polygons.clone(), source_solid);
                     for previous in &previous_cutters {
-                        caps = ConvexSolid::route_polygons_outside_of(caps, previous);
+                        caps = scratch.route_outside_of(caps, previous);
                     }
                     for cap in &mut caps {
                         cap.material = source_solid.material;
@@ -909,5 +907,34 @@ mod tests {
         assert_eq!(routed.mesh.triangle_count(), stable.mesh.triangle_count());
         assert_eq!(routed.mesh.positions, stable.mesh.positions);
         assert_eq!(routed.mesh.indices, stable.mesh.indices);
+    }
+
+    #[test]
+    fn rotated_cut_stack_regression_preserves_ordered_output_shape() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "slab",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::new(32.0, 32.0, 4.0)),
+            MaterialId(1),
+        );
+
+        for index in 0..64 {
+            let angle = index as f32 * 0.173;
+            let radius = 11.0 + (index % 7) as f32 * 0.35;
+            let center = Vec3::new(angle.cos() * radius, angle.sin() * radius, 0.0);
+            asm.cut_oriented_box(
+                format!("rotated_void_{index}"),
+                center,
+                Vec3::new(1.0 + (index % 3) as f32 * 0.3, 8.0, 5.0),
+                bevy_math::Quat::from_rotation_z(angle),
+            );
+        }
+
+        let output = asm.rebuild();
+
+        assert_eq!(output.report.emitted_convex_fragments, 280);
+        assert_eq!(output.mesh.triangle_count(), 3404);
+        assert_eq!(output.report.candidate_pairs, 804);
+        assert_eq!(output.report.rejected_pairs, 9417);
     }
 }

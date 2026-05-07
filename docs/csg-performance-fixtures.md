@@ -110,6 +110,11 @@ triangles instead of the fragment carver's 72 closed-fragment triangles. That is
 cleaner surface output, not yet faster output. The implementation still moves
 owned polygon vectors around, so it is a topology proof before it is a hot path.
 
+Dense-kernel regression guardrail: `rotated_cut_stack_64` is pinned by tests at
+280 fragments, 3404 triangles, 804 candidate pairs, and 9417 rejected pairs.
+This protects against "optimizations" that alter ordered CSG semantics while
+looking faster. Output-contract changes need to be explicit.
+
 ## Latest Local Baseline
 
 Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
