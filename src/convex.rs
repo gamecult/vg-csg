@@ -81,6 +81,14 @@ pub struct ConvexSolid {
     pub bounds: Aabb,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CategorizedPolygons {
+    pub inside: Vec<ConvexPolygon>,
+    pub outside: Vec<ConvexPolygon>,
+    pub aligned: Vec<ConvexPolygon>,
+    pub reverse_aligned: Vec<ConvexPolygon>,
+}
+
 impl ConvexSolid {
     pub fn from_aabb(bounds: Aabb, material: MaterialId) -> Self {
         Self::box_from_center_size(bounds.center(), bounds.size(), Quat::IDENTITY, material)
@@ -209,6 +217,42 @@ impl ConvexSolid {
         }
     }
 
+    pub fn categorize_polygons_against(&self, cutter: &Self) -> CategorizedPolygons {
+        let mut categorized = CategorizedPolygons::default();
+
+        for polygon in &self.polygons {
+            let mut pieces = vec![CategorizationPiece {
+                polygon: polygon.clone(),
+                aligned_category: None,
+            }];
+
+            for plane in &cutter.clip_planes {
+                let mut inside_pieces = Vec::new();
+                for piece in pieces {
+                    classify_piece_against_plane(
+                        piece,
+                        *plane,
+                        &mut inside_pieces,
+                        &mut categorized,
+                    );
+                }
+                pieces = inside_pieces;
+            }
+
+            for piece in pieces {
+                match piece.aligned_category {
+                    Some(PolygonCategory::Aligned) => categorized.aligned.push(piece.polygon),
+                    Some(PolygonCategory::ReverseAligned) => {
+                        categorized.reverse_aligned.push(piece.polygon);
+                    }
+                    _ => categorized.inside.push(piece.polygon),
+                }
+            }
+        }
+
+        categorized
+    }
+
     fn split(&self, plane: Plane) -> SplitResult {
         let mut saw_front = false;
         let mut saw_back = false;
@@ -276,10 +320,82 @@ enum SplitResult {
     Coplanar(ConvexSolid),
 }
 
+struct CategorizationPiece {
+    polygon: ConvexPolygon,
+    aligned_category: Option<PolygonCategory>,
+}
+
 #[derive(Clone, Copy)]
 enum KeepSide {
     Front,
     Back,
+}
+
+fn classify_piece_against_plane(
+    mut piece: CategorizationPiece,
+    plane: Plane,
+    inside_pieces: &mut Vec<CategorizationPiece>,
+    categorized: &mut CategorizedPolygons,
+) {
+    let piece_plane = piece
+        .polygon
+        .vertices
+        .first()
+        .map(|point| Plane::from_point_normal(*point, piece.polygon.normal));
+
+    if piece_plane.is_some_and(|piece_plane| piece_plane.is_coplanar_with(plane)) {
+        piece.aligned_category = Some(if piece.polygon.normal.dot(plane.normal) >= 0.0 {
+            PolygonCategory::Aligned
+        } else {
+            PolygonCategory::ReverseAligned
+        });
+        inside_pieces.push(piece);
+        return;
+    }
+
+    let mut saw_front = false;
+    let mut saw_back = false;
+    for vertex in &piece.polygon.vertices {
+        let distance = plane.signed_distance(*vertex);
+        saw_front |= distance > EPSILON;
+        saw_back |= distance < -EPSILON;
+    }
+
+    match (saw_front, saw_back) {
+        (true, false) => {
+            let mut polygon = piece.polygon;
+            polygon.category = PolygonCategory::Outside;
+            categorized.outside.push(polygon);
+        }
+        (false, true) | (false, false) => inside_pieces.push(piece),
+        (true, true) => {
+            let mut cap_points = Vec::new();
+            let outside = clip_polygon(
+                &piece.polygon.vertices,
+                plane,
+                KeepSide::Front,
+                &mut cap_points,
+            );
+            if outside.len() >= 3 {
+                let mut outside_polygon = piece.polygon.with_vertices(outside);
+                outside_polygon.category = PolygonCategory::Outside;
+                categorized.outside.push(outside_polygon);
+            }
+
+            let inside = clip_polygon(
+                &piece.polygon.vertices,
+                plane,
+                KeepSide::Back,
+                &mut cap_points,
+            );
+            if inside.len() >= 3 {
+                inside_pieces.push(CategorizationPiece {
+                    polygon: piece.polygon.with_vertices(inside),
+                    aligned_category: piece.aligned_category,
+                });
+            }
+        }
+    }
 }
 
 fn clip_polygon(
@@ -516,6 +632,41 @@ mod tests {
         assert!(common.bounds.contains_point(Vec3::ZERO));
         assert!(common.bounds.contains_point(Vec3::new(2.0, 0.0, 0.0)));
         assert!(!common.bounds.contains_point(Vec3::new(-2.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn categorize_crossing_coplanar_face_splits_visible_categories() {
+        let source = ConvexSolid::box_from_center_size(
+            Vec3::ZERO,
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            MaterialId(1),
+        );
+        let cutter = ConvexSolid::box_from_center_size(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(2.0, 2.0, 2.0),
+            Quat::IDENTITY,
+            MaterialId(0),
+        );
+
+        let categorized = source.categorize_polygons_against(&cutter);
+
+        assert_eq!(categorized.aligned.len(), 1);
+        assert!(categorized.outside.len() > 6);
+        assert!(categorized.inside.is_empty());
+        assert!(categorized.reverse_aligned.is_empty());
+        assert!(
+            categorized
+                .aligned
+                .iter()
+                .all(|polygon| polygon.category == PolygonCategory::Aligned)
+        );
+        assert!(
+            categorized
+                .outside
+                .iter()
+                .all(|polygon| polygon.category == PolygonCategory::Outside)
+        );
     }
 
     #[test]

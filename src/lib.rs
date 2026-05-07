@@ -16,7 +16,7 @@ mod tree;
 
 pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
-pub use convex::{ConvexPolygon, ConvexSolid, Plane};
+pub use convex::{CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane};
 pub use dsl::LevelDsl;
 pub use mesh::TriangleMesh;
 pub use primitives::{

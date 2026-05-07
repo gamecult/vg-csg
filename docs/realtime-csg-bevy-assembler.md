@@ -75,10 +75,15 @@ angled box cuts, real `Common` branch output for convex boxes, and gives us the
 correct shape for a future general convex brush kernel.
 
 Polygons now carry the first routing metadata the mature kernel needs:
-category, visibility, reversal, and bounds. Whole polygons can already be
-classified as inside, outside, aligned, or reverse-aligned against a convex
-brush when they do not cross cutter planes. That is deliberately not sold as
-the full router yet. It is the labeled wire we will plug the splitter into.
+category, visibility, reversal, and bounds. Source polygons can be classified
+as inside, outside, aligned, or reverse-aligned against a convex brush. When a
+polygon crosses a cutter plane, it is split first and each piece is routed to a
+category bucket. That matches the public demo's important shape: split crossing
+polygons before final category decisions.
+
+That is deliberately not sold as full parity yet. The current assembler still
+emits meshes through convex fragment decomposition. The next parity step is to
+make those category buckets drive boolean-tree mesh emission directly.
 
 The important doctrinal adjustment from the public demo and blog series is that
 real-time CSG should think in **classification**, not only carving. A polygon is
@@ -160,6 +165,10 @@ kernel: split crossing polygons, route classified source polygons through
 boolean branches, preserve material/surface metadata, and then add a BVH or
 spatial hash so cutter cost does not scale like a punishment.
 
+Performance fixtures live in `docs/research/csg-performance-fixtures.md` and
+`tools/run_csg_perf.ps1`. They time our release fixture now and reserve a JSONL
+slot for a public-demo/reference harness when one is available.
+
 ## Limits
 
 `vg_csg` is not yet a full RealtimeCSG replacement.
@@ -172,6 +181,8 @@ spatial hash so cutter cost does not scale like a punishment.
 - current subtraction emits split fragments with generated cap polygons; the
   target kernel should move toward article/demo-style category routing over
   brush polygons for speed and cleaner material behavior
+- no reference timing executable is wired yet; the perf wrapper records this
+  explicitly instead of inventing comparison numbers
 
 Those limits are explicit because invisible ambition is how you get haunted by
 your own abstractions. The useful loop exists now: script brushes, assemble,

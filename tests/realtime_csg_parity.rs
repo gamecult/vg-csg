@@ -141,3 +141,26 @@ fn parity_outer_box_polygons_classify_as_outside_inner_box() {
             .all(|polygon| polygon.category == PolygonCategory::Outside)
     );
 }
+
+#[test]
+fn parity_crossing_polygons_split_before_final_category() {
+    let source = ConvexSolid::box_from_center_size(
+        Vec3::ZERO,
+        Vec3::splat(4.0),
+        Quat::IDENTITY,
+        MaterialId(1),
+    );
+    let cutter = ConvexSolid::box_from_center_size(
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(2.0, 2.0, 2.0),
+        Quat::IDENTITY,
+        MaterialId(0),
+    );
+
+    let categorized = source.categorize_polygons_against(&cutter);
+
+    assert_eq!(categorized.aligned.len(), 1);
+    assert!(categorized.outside.len() > source.polygons.len());
+    assert_eq!(categorized.inside.len(), 0);
+    assert_eq!(categorized.reverse_aligned.len(), 0);
+}
