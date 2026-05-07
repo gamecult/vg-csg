@@ -89,3 +89,55 @@ fn parity_center_box_subtraction_has_six_surviving_regions() {
     assert_eq!(output.report.emitted_convex_fragments, 6);
     assert_eq!(output.report.warnings.len(), 0);
 }
+
+#[test]
+fn parity_identical_box_polygons_classify_as_aligned() {
+    let cutter = ConvexSolid::box_from_center_size(
+        Vec3::ZERO,
+        Vec3::splat(2.0),
+        Quat::IDENTITY,
+        MaterialId(0),
+    );
+    let mut source = ConvexSolid::box_from_center_size(
+        Vec3::ZERO,
+        Vec3::splat(2.0),
+        Quat::IDENTITY,
+        MaterialId(1),
+    );
+
+    source.categorize_whole_polygons_against(&cutter);
+
+    assert_eq!(source.polygons.len(), 6);
+    assert!(
+        source
+            .polygons
+            .iter()
+            .all(|polygon| polygon.category == PolygonCategory::Aligned)
+    );
+}
+
+#[test]
+fn parity_outer_box_polygons_classify_as_outside_inner_box() {
+    let cutter = ConvexSolid::box_from_center_size(
+        Vec3::ZERO,
+        Vec3::splat(2.0),
+        Quat::IDENTITY,
+        MaterialId(0),
+    );
+    let mut source = ConvexSolid::box_from_center_size(
+        Vec3::ZERO,
+        Vec3::splat(4.0),
+        Quat::IDENTITY,
+        MaterialId(1),
+    );
+
+    source.categorize_whole_polygons_against(&cutter);
+
+    assert_eq!(source.polygons.len(), 6);
+    assert!(
+        source
+            .polygons
+            .iter()
+            .all(|polygon| polygon.category == PolygonCategory::Outside)
+    );
+}

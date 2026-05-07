@@ -28,6 +28,13 @@ pub struct Aabb {
 }
 
 impl Aabb {
+    pub fn empty() -> Self {
+        Self {
+            min: Vec3::splat(f32::INFINITY),
+            max: Vec3::splat(f32::NEG_INFINITY),
+        }
+    }
+
     pub fn from_center_size(center: Vec3, size: Vec3) -> Self {
         let half = size * 0.5;
         Self {
@@ -40,6 +47,32 @@ impl Aabb {
         Self { min, max }
     }
 
+    pub fn from_points(points: &[Vec3]) -> Self {
+        let mut bounds = Self::empty();
+        for point in points {
+            bounds.include_point(*point);
+        }
+        bounds
+    }
+
+    pub fn include_point(&mut self, point: Vec3) {
+        self.min = self.min.min(point);
+        self.max = self.max.max(point);
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        if !self.has_finite_extents() {
+            return other;
+        }
+        if !other.has_finite_extents() {
+            return self;
+        }
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
     pub fn size(self) -> Vec3 {
         self.max - self.min
     }
@@ -50,6 +83,10 @@ impl Aabb {
 
     pub fn is_valid(self) -> bool {
         self.max.x > self.min.x && self.max.y > self.min.y && self.max.z > self.min.z
+    }
+
+    pub fn has_finite_extents(self) -> bool {
+        self.min.is_finite() && self.max.is_finite()
     }
 
     pub fn intersects(self, other: Self) -> bool {
@@ -226,4 +263,103 @@ impl Brush {
             _ => None,
         }
     }
+
+    pub fn bounds(&self) -> Aabb {
+        self.primitive.bounds()
+    }
+}
+
+impl Primitive {
+    pub fn bounds(&self) -> Aabb {
+        match *self {
+            Self::Box { bounds } => bounds,
+            Self::OrientedBox {
+                center,
+                size,
+                rotation,
+            } => oriented_box_bounds(center, size, rotation),
+            Self::CylinderZ {
+                center,
+                radius,
+                depth,
+                ..
+            } => Aabb::new(
+                center - Vec3::new(radius, radius, depth * 0.5),
+                center + Vec3::new(radius, radius, depth * 0.5),
+            ),
+            Self::DomeCapZ {
+                center,
+                radius,
+                height,
+                ..
+            } => Aabb::new(
+                center - Vec3::new(radius, radius, 0.0),
+                center + Vec3::new(radius, radius, height),
+            ),
+            Self::FloretArm {
+                anchor,
+                direction,
+                length,
+                root_width,
+                tip_width,
+                thickness,
+                tip_lift,
+            } => floret_bounds(
+                anchor, direction, length, root_width, tip_width, thickness, tip_lift,
+            ),
+        }
+    }
+}
+
+fn oriented_box_bounds(center: Vec3, size: Vec3, rotation: Quat) -> Aabb {
+    let half = size * 0.5;
+    let local_corners = [
+        Vec3::new(-half.x, -half.y, -half.z),
+        Vec3::new(half.x, -half.y, -half.z),
+        Vec3::new(half.x, half.y, -half.z),
+        Vec3::new(-half.x, half.y, -half.z),
+        Vec3::new(-half.x, -half.y, half.z),
+        Vec3::new(half.x, -half.y, half.z),
+        Vec3::new(half.x, half.y, half.z),
+        Vec3::new(-half.x, half.y, half.z),
+    ];
+    let corners = local_corners.map(|point| center + rotation * point);
+    Aabb::from_points(&corners)
+}
+
+fn floret_bounds(
+    anchor: Vec3,
+    direction: Vec3,
+    length: f32,
+    root_width: f32,
+    tip_width: f32,
+    thickness: f32,
+    tip_lift: f32,
+) -> Aabb {
+    let forward = direction.normalize_or_zero();
+    let forward = if forward.length_squared() == 0.0 {
+        Vec3::X
+    } else {
+        forward
+    };
+    let mut side = forward.cross(Vec3::Z).normalize_or_zero();
+    if side.length_squared() == 0.0 {
+        side = Vec3::Y;
+    }
+
+    let root_center = anchor;
+    let tip_center = anchor + forward * length + Vec3::Z * tip_lift;
+    let z = Vec3::Z * (thickness * 0.5);
+    let r = side * (root_width * 0.5);
+    let t = side * (tip_width * 0.5);
+    Aabb::from_points(&[
+        root_center - r - z,
+        root_center + r - z,
+        root_center - r + z,
+        root_center + r + z,
+        tip_center - t - z,
+        tip_center + t - z,
+        tip_center - t + z,
+        tip_center + t + z,
+    ])
 }

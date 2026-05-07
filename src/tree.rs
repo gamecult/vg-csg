@@ -1,4 +1,4 @@
-use crate::{Assembler, Brush, BrushId, BrushOp, MaterialId, Primitive};
+use crate::{Aabb, Assembler, Brush, BrushId, BrushOp, MaterialId, Primitive};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CsgNodeId(pub u32);
@@ -160,6 +160,13 @@ impl CsgTreeArena {
         Some(children)
     }
 
+    pub fn node_bounds(&self, id: CsgNodeId) -> Option<Aabb> {
+        match self.node(id)? {
+            CsgNode::Brush(brush) => Some(brush.bounds()),
+            CsgNode::Branch { op, children, .. } => self.branch_bounds(*op, children),
+        }
+    }
+
     pub fn compile_tree_to_assembler(&self, tree: CsgTree) -> Assembler {
         let mut assembler = Assembler::new();
         self.compile_node(tree.root, &mut assembler, None);
@@ -207,11 +214,30 @@ impl CsgTreeArena {
                     }
                 }
                 CsgBranchOp::Common => {
-                    for child in children {
-                        self.compile_node(*child, assembler, Some(CsgOperationType::Intersecting));
+                    if let Some((first, rest)) = children.split_first() {
+                        self.compile_node(*first, assembler, operation_override);
+                        for child in rest {
+                            self.compile_node(
+                                *child,
+                                assembler,
+                                Some(CsgOperationType::Intersecting),
+                            );
+                        }
                     }
                 }
             },
+        }
+    }
+
+    fn branch_bounds(&self, op: CsgBranchOp, children: &[CsgNodeId]) -> Option<Aabb> {
+        let mut child_bounds = children.iter().filter_map(|child| self.node_bounds(*child));
+        match op {
+            CsgBranchOp::Addition => child_bounds.reduce(Aabb::union),
+            CsgBranchOp::Subtraction => child_bounds.next(),
+            CsgBranchOp::Common => {
+                let first = child_bounds.next()?;
+                child_bounds.try_fold(first, |bounds, child| bounds.intersection(child))
+            }
         }
     }
 }
@@ -302,5 +328,74 @@ mod tests {
         assert!(arena.set_brush_operation_type(b, CsgOperationType::Subtractive));
         assert_eq!(arena.brush_count(), 2);
         assert_eq!(arena.branch_count(), 1);
+    }
+
+    #[test]
+    fn tree_bounds_follow_boolean_branch_shape() {
+        let mut arena = CsgTreeArena::new();
+        let a = arena.generate_brush(
+            "a",
+            CsgOperationType::Additive,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            },
+            MaterialId(1),
+        );
+        let b = arena.generate_brush(
+            "b",
+            CsgOperationType::Additive,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::X * 2.5, Vec3::splat(2.0)),
+            },
+            MaterialId(1),
+        );
+        let union = arena.generate_branch("union", CsgBranchOp::Addition, [a.node, b.node]);
+        let common = arena.generate_branch("common", CsgBranchOp::Common, [a.node, b.node]);
+        let subtract =
+            arena.generate_branch("subtract", CsgBranchOp::Subtraction, [a.node, b.node]);
+
+        assert_eq!(
+            arena.node_bounds(union.node).expect("union"),
+            Aabb::new(Vec3::splat(-2.0), Vec3::new(3.5, 2.0, 2.0))
+        );
+        assert_eq!(
+            arena.node_bounds(common.node).expect("common"),
+            Aabb::new(Vec3::new(1.5, -1.0, -1.0), Vec3::new(2.0, 1.0, 1.0))
+        );
+        assert_eq!(
+            arena.node_bounds(subtract.node).expect("subtract"),
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0))
+        );
+    }
+
+    #[test]
+    fn tree_common_compiles_to_additive_source_then_intersections() {
+        let mut arena = CsgTreeArena::new();
+        let a = arena.generate_brush(
+            "a",
+            CsgOperationType::Additive,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            },
+            MaterialId(1),
+        );
+        let b = arena.generate_brush(
+            "b",
+            CsgOperationType::Additive,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::X, Vec3::splat(4.0)),
+            },
+            MaterialId(1),
+        );
+        let branch = arena.generate_branch("common", CsgBranchOp::Common, [a.node, b.node]);
+
+        let assembler = arena.compile_tree_to_assembler(arena.generate_tree(branch.node));
+        let output = assembler.build();
+
+        assert_eq!(assembler.brushes()[0].op, BrushOp::Add);
+        assert_eq!(assembler.brushes()[1].op, BrushOp::Intersect);
+        assert_eq!(output.report.emitted_convex_fragments, 1);
+        assert_eq!(output.report.warnings.len(), 0);
+        assert_eq!(output.mesh.triangle_count(), 12);
     }
 }

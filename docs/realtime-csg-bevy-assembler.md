@@ -69,10 +69,16 @@ assert!(output.mesh.triangle_count() > 12);
 
 The first actual CSG operator was exact AABB subtraction against additive AABB
 solids. The current kernel has moved to convex decomposition: an additive
-convex solid is split against each outward cutter plane, outside fragments are
-emitted, and the inside remainder is discarded after the final plane. This
-supports angled box cuts and gives us the correct shape for a future general
-convex brush kernel.
+convex solid is split against each outward cutter plane, subtraction emits the
+outside fragments, and intersection keeps the inside remainder. This supports
+angled box cuts, real `Common` branch output for convex boxes, and gives us the
+correct shape for a future general convex brush kernel.
+
+Polygons now carry the first routing metadata the mature kernel needs:
+category, visibility, reversal, and bounds. Whole polygons can already be
+classified as inside, outside, aligned, or reverse-aligned against a convex
+brush when they do not cross cutter planes. That is deliberately not sold as
+the full router yet. It is the labeled wire we will plug the splitter into.
 
 The important doctrinal adjustment from the public demo and blog series is that
 real-time CSG should think in **classification**, not only carving. A polygon is
@@ -134,12 +140,13 @@ For interactive work, the brush list is the durable design surface. The mesh is
 a cache. This matters because agents should revise intent by moving, adding, or
 renaming brushes, not by poking triangles after the fact.
 
-Use CSG where negative space carries meaning:
+Use CSG where boolean space carries meaning:
 
 - doorways, windows, hatches, service trenches
 - docking sockets and tether anchor gaps
 - ring terraces and mechanically repeated cutouts
 - fast blockouts where the same cutter can punch many solids
+- common-volume filters where rooms, shafts, or constraint regions overlap
 
 Use additive procedural primitives where a form is better described by a field
 or sweep than by carving:
@@ -148,10 +155,10 @@ or sweep than by carving:
 - city-field parcels after street generation
 - flower-like utility crests and other habitat-specific silhouettes
 
-The immediate next upgrade is not "more primitives." It is a stronger convex
-brush kernel: plane classification, polygon clipping, category routing,
-fragment merge policy, and a BVH or spatial hash so cutter cost does not scale
-like a punishment.
+The immediate next upgrade is not "more primitives." It is the category-router
+kernel: split crossing polygons, route classified source polygons through
+boolean branches, preserve material/surface metadata, and then add a BVH or
+spatial hash so cutter cost does not scale like a punishment.
 
 ## Limits
 
@@ -159,7 +166,7 @@ like a punishment.
 
 - subtractive convex support currently covers axis-aligned and oriented boxes
 - non-box subtractors are reported and ignored
-- intersect brushes are reported and ignored
+- intersect/common support currently covers axis-aligned and oriented boxes
 - output is Bevy-compatible mesh data, not yet a Bevy `Mesh` asset constructor
 - there is no editor gizmo, ECS plugin, or incremental spatial index yet
 - current subtraction emits split fragments with generated cap polygons; the

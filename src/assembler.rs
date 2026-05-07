@@ -9,7 +9,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildWarning {
     SubtractIgnoredForNonBox { brush: String },
-    IntersectUnsupported { brush: String },
+    IntersectIgnoredForNonBox { brush: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -208,9 +208,15 @@ impl Assembler {
                     }
                 }
                 BrushOp::Intersect => {
-                    report.warnings.push(BuildWarning::IntersectUnsupported {
-                        brush: brush.name.clone(),
-                    });
+                    if let Some(cutter) = convex_cutter_for_brush(brush) {
+                        solids = intersect_solids(&solids, &cutter);
+                    } else {
+                        report
+                            .warnings
+                            .push(BuildWarning::IntersectIgnoredForNonBox {
+                                brush: brush.name.clone(),
+                            });
+                    }
                 }
             }
         }
@@ -269,7 +275,23 @@ fn convex_cutter_for_brush(brush: &Brush) -> Option<ConvexSolid> {
 fn subtract_from_solids(solids: &[ConvexSolid], cutter: &ConvexSolid) -> Vec<ConvexSolid> {
     let mut out = Vec::with_capacity(solids.len() + 4);
     for solid in solids {
-        out.extend(solid.subtract_convex(cutter));
+        if solid.bounds.intersects(cutter.bounds) {
+            out.extend(solid.subtract_convex(cutter));
+        } else {
+            out.push(solid.clone());
+        }
+    }
+    out
+}
+
+fn intersect_solids(solids: &[ConvexSolid], cutter: &ConvexSolid) -> Vec<ConvexSolid> {
+    let mut out = Vec::with_capacity(solids.len());
+    for solid in solids {
+        if solid.bounds.intersects(cutter.bounds)
+            && let Some(fragment) = solid.intersect_convex(cutter)
+        {
+            out.push(fragment);
+        }
     }
     out
 }
@@ -336,5 +358,46 @@ mod tests {
         assert_eq!(mesh.triangle_count(), 12);
         assert_eq!(mesh.triangle_materials.len(), 12);
         assert_eq!(mesh.triangle_materials[0], MaterialId(7));
+    }
+
+    #[test]
+    fn distant_subtract_skips_convex_split_and_keeps_source_solid() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(2.0)),
+            MaterialId(1),
+        );
+        asm.cut_box(
+            "far void",
+            Aabb::from_center_size(Vec3::splat(10.0), Vec3::splat(1.0)),
+        );
+
+        let output = asm.build();
+        assert_eq!(output.report.emitted_convex_fragments, 1);
+        assert_eq!(output.mesh.triangle_count(), 12);
+    }
+
+    #[test]
+    fn intersecting_box_keeps_common_convex_region() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "a",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        asm.add_brush(
+            "b",
+            BrushOp::Intersect,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::X, Vec3::splat(4.0)),
+            },
+            MaterialId(1),
+        );
+
+        let output = asm.build();
+        assert_eq!(output.report.emitted_convex_fragments, 1);
+        assert_eq!(output.report.warnings.len(), 0);
+        assert_eq!(output.mesh.triangle_count(), 12);
     }
 }

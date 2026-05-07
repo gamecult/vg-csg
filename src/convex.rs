@@ -1,6 +1,6 @@
 use bevy_math::{Quat, Vec2, Vec3};
 
-use crate::{Aabb, MaterialId, TriangleMesh};
+use crate::{Aabb, MaterialId, PolygonCategory, TriangleMesh};
 
 const EPSILON: f32 = 1.0e-5;
 
@@ -22,6 +22,11 @@ impl Plane {
     pub fn signed_distance(self, point: Vec3) -> f32 {
         self.normal.dot(point) + self.distance
     }
+
+    pub fn is_coplanar_with(self, other: Self) -> bool {
+        self.normal.dot(other.normal).abs() > 1.0 - EPSILON
+            && (self.distance - other.distance).abs() <= EPSILON
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +34,43 @@ pub struct ConvexPolygon {
     pub vertices: Vec<Vec3>,
     pub normal: Vec3,
     pub material: MaterialId,
+    pub category: PolygonCategory,
+    pub visible: bool,
+    pub reversed: bool,
+    pub bounds: Aabb,
+}
+
+impl ConvexPolygon {
+    pub fn new(vertices: Vec<Vec3>, normal: Vec3, material: MaterialId) -> Self {
+        Self {
+            bounds: Aabb::from_points(&vertices),
+            vertices,
+            normal: normal.normalize_or_zero(),
+            material,
+            category: PolygonCategory::Aligned,
+            visible: true,
+            reversed: false,
+        }
+    }
+
+    pub fn centroid(&self) -> Vec3 {
+        if self.vertices.is_empty() {
+            return Vec3::ZERO;
+        }
+        self.vertices.iter().copied().sum::<Vec3>() / self.vertices.len() as f32
+    }
+
+    fn with_vertices(&self, vertices: Vec<Vec3>) -> Self {
+        Self {
+            bounds: Aabb::from_points(&vertices),
+            vertices,
+            normal: self.normal,
+            material: self.material,
+            category: self.category,
+            visible: self.visible,
+            reversed: self.reversed,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +78,7 @@ pub struct ConvexSolid {
     pub polygons: Vec<ConvexPolygon>,
     pub clip_planes: Vec<Plane>,
     pub material: MaterialId,
+    pub bounds: Aabb,
 }
 
 impl ConvexSolid {
@@ -76,14 +119,11 @@ impl ConvexSolid {
             let normal = rotation * local_normal;
             let vertices = indices.map(|index| corners[index]).to_vec();
             clip_planes.push(Plane::from_point_normal(vertices[0], normal));
-            polygons.push(ConvexPolygon {
-                vertices,
-                normal,
-                material,
-            });
+            polygons.push(ConvexPolygon::new(vertices, normal, material));
         }
 
         Self {
+            bounds: Aabb::from_points(&corners),
             polygons,
             clip_planes,
             material,
@@ -120,19 +160,51 @@ impl ConvexSolid {
         fragments
     }
 
+    pub fn intersect_convex(&self, cutter: &Self) -> Option<Self> {
+        let mut remainder = self.clone();
+
+        for plane in &cutter.clip_planes {
+            remainder = match remainder.split(*plane) {
+                SplitResult::Front(_) => return None,
+                SplitResult::Back(back) | SplitResult::Coplanar(back) => back,
+                SplitResult::Both { back, .. } => back,
+            };
+        }
+
+        Some(remainder)
+    }
+
     pub fn append_to_mesh(&self, mesh: &mut TriangleMesh) {
         for polygon in &self.polygons {
-            if polygon.vertices.len() < 3 {
+            if !polygon.visible || polygon.vertices.len() < 3 {
                 continue;
             }
             let base = polygon.vertices[0];
             for i in 1..polygon.vertices.len() - 1 {
+                let triangle = if polygon.reversed {
+                    [base, polygon.vertices[i + 1], polygon.vertices[i]]
+                } else {
+                    [base, polygon.vertices[i], polygon.vertices[i + 1]]
+                };
+                let normal = if polygon.reversed {
+                    -polygon.normal
+                } else {
+                    polygon.normal
+                };
                 mesh.append_triangle(
-                    [base, polygon.vertices[i], polygon.vertices[i + 1]],
-                    polygon.normal,
+                    triangle,
+                    normal,
                     [Vec2::ZERO, Vec2::X, Vec2::Y],
                     polygon.material,
                 );
+            }
+        }
+    }
+
+    pub fn categorize_whole_polygons_against(&mut self, cutter: &Self) {
+        for polygon in &mut self.polygons {
+            if let Some(category) = whole_polygon_category_against(polygon, cutter) {
+                polygon.category = category;
             }
         }
     }
@@ -162,20 +234,12 @@ impl ConvexSolid {
         for polygon in &self.polygons {
             let front = clip_polygon(&polygon.vertices, plane, KeepSide::Front, &mut cap_points);
             if front.len() >= 3 {
-                front_polygons.push(ConvexPolygon {
-                    normal: polygon.normal,
-                    vertices: front,
-                    material: polygon.material,
-                });
+                front_polygons.push(polygon.with_vertices(front));
             }
 
             let back = clip_polygon(&polygon.vertices, plane, KeepSide::Back, &mut cap_points);
             if back.len() >= 3 {
-                back_polygons.push(ConvexPolygon {
-                    normal: polygon.normal,
-                    vertices: back,
-                    material: polygon.material,
-                });
+                back_polygons.push(polygon.with_vertices(back));
             }
         }
 
@@ -187,11 +251,13 @@ impl ConvexSolid {
 
         SplitResult::Both {
             front: Self {
+                bounds: bounds_from_polygons(&front_polygons),
                 clip_planes: planes_from_polygons(&front_polygons),
                 polygons: front_polygons,
                 material: self.material,
             },
             back: Self {
+                bounds: bounds_from_polygons(&back_polygons),
                 clip_planes: planes_from_polygons(&back_polygons),
                 polygons: back_polygons,
                 material: self.material,
@@ -284,11 +350,7 @@ fn make_cap_polygon(points: &[Vec3], normal: Vec3, material: MaterialId) -> Conv
         vertices.reverse();
     }
 
-    ConvexPolygon {
-        vertices,
-        normal,
-        material,
-    }
+    ConvexPolygon::new(vertices, normal, material)
 }
 
 fn unique_points_on_plane(points: Vec<Vec3>) -> Vec<Vec3> {
@@ -315,6 +377,55 @@ fn planes_from_polygons(polygons: &[ConvexPolygon]) -> Vec<Plane> {
                 .map(|point| Plane::from_point_normal(*point, polygon.normal))
         })
         .collect()
+}
+
+fn bounds_from_polygons(polygons: &[ConvexPolygon]) -> Aabb {
+    polygons.iter().fold(Aabb::empty(), |bounds, polygon| {
+        bounds.union(polygon.bounds)
+    })
+}
+
+fn whole_polygon_category_against(
+    polygon: &ConvexPolygon,
+    cutter: &ConvexSolid,
+) -> Option<PolygonCategory> {
+    let polygon_plane = polygon
+        .vertices
+        .first()
+        .map(|point| Plane::from_point_normal(*point, polygon.normal))?;
+
+    for cutter_plane in &cutter.clip_planes {
+        if polygon_plane.is_coplanar_with(*cutter_plane)
+            && polygon
+                .vertices
+                .iter()
+                .all(|vertex| cutter_plane.signed_distance(*vertex).abs() <= EPSILON)
+        {
+            return Some(if polygon.normal.dot(cutter_plane.normal) >= 0.0 {
+                PolygonCategory::Aligned
+            } else {
+                PolygonCategory::ReverseAligned
+            });
+        }
+    }
+
+    let mut fully_inside = true;
+    for cutter_plane in &cutter.clip_planes {
+        let mut all_outside_this_plane = true;
+        for vertex in &polygon.vertices {
+            let distance = cutter_plane.signed_distance(*vertex);
+            if distance > EPSILON {
+                fully_inside = false;
+            } else {
+                all_outside_this_plane = false;
+            }
+        }
+        if all_outside_this_plane {
+            return Some(PolygonCategory::Outside);
+        }
+    }
+
+    fully_inside.then_some(PolygonCategory::Inside)
 }
 
 fn polygon_normal(vertices: &[Vec3]) -> Vec3 {
@@ -381,6 +492,30 @@ mod tests {
                 .iter()
                 .all(|fragment| !fragment.polygons.is_empty())
         );
+    }
+
+    #[test]
+    fn intersect_overlapping_boxes_emits_single_common_solid() {
+        let source = ConvexSolid::box_from_center_size(
+            Vec3::ZERO,
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            MaterialId(1),
+        );
+        let cutter = ConvexSolid::box_from_center_size(
+            Vec3::X,
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            MaterialId(0),
+        );
+
+        let common = source.intersect_convex(&cutter).expect("intersection");
+
+        assert!(common.bounds.is_valid());
+        assert_eq!(common.polygons.len(), 6);
+        assert!(common.bounds.contains_point(Vec3::ZERO));
+        assert!(common.bounds.contains_point(Vec3::new(2.0, 0.0, 0.0)));
+        assert!(!common.bounds.contains_point(Vec3::new(-2.0, 0.0, 0.0)));
     }
 
     #[test]
