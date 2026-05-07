@@ -120,15 +120,15 @@ operations by `BrushId`, invalidating cached output and incrementing generation.
 `DirtyDemandFrontier` computes the conservative ordered suffix after the first
 dirty brush. The prefix before that index is the cacheable region; the suffix is
 the live region because ordered CSG decisions propagate forward. The first
-implementation now uses that boundary only for box-only prefix checkpoints; the
-convex/router path still needs the same treatment.
+implementation now uses that boundary for box-only and general convex prefix
+checkpoints. The category-router path still needs the same treatment.
 
-Incremental edit seam: box-only ordered CSG now stores prefix checkpoints after
-each brush. A tail edit can resume from the checkpoint immediately before the
-dirty brush and replay only the live suffix. The result is parity-checked
-against a full rebuild. This is a real cache boundary, but final mesh emission is
-still whole-output, so the current win appears in larger tail-edit cases rather
-than tiny scenes.
+Incremental edit seam: ordered CSG now stores prefix checkpoints after each
+brush for both the box and general convex builders. A tail edit can resume from
+the checkpoint immediately before the dirty brush and replay only the live
+suffix. The result is parity-checked against a full rebuild. Cache validity is
+tracked as a prefix boundary so repeated edits do not deep-copy stale
+checkpoints. Final mesh emission is still whole-output.
 
 ## Latest Local Baseline
 
@@ -163,29 +163,34 @@ rotated subtraction is still the open wound. The category-router kernel remains
 the next architectural move; cached output is a guardrail, not a replacement
 for the real engine.
 
-## Incremental Box-Only Smoke Run
+## Incremental Dirty Smoke Run
 
 Captured on 2026-05-07 with
 `cargo run -p vg_csg --release --example csg_perf_fixture`. Dirty modes mutate
-the tail brush each iteration. `incremental_dirty` uses the box-prefix
-checkpoint cache when the scene is box-only and falls back for non-box/rotated
-cases.
+the tail brush each iteration. `incremental_dirty` uses prefix checkpoints and
+falls back to full replay only when no valid checkpoint exists.
 
 ```jsonl
-{"kernel":"vg_csg","mode":"stable","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":518,"min_ns":500,"p50_ns":500,"p95_ns":600,"max_ns":700,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
-{"kernel":"vg_csg","mode":"dirty","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":4287,"min_ns":3800,"p50_ns":4000,"p95_ns":4700,"max_ns":14000,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
-{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":4617,"min_ns":4100,"p50_ns":4200,"p95_ns":6600,"max_ns":10600,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
-{"kernel":"vg_csg","mode":"stable","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":46415,"min_ns":41500,"p50_ns":42200,"p95_ns":52400,"max_ns":195100,"triangles":3072,"fragments":256,"warnings":0,"candidate_pairs":64,"rejected_pairs":8128}
-{"kernel":"vg_csg","mode":"dirty","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":825753,"min_ns":464400,"p50_ns":715400,"p95_ns":1257500,"max_ns":3452200,"triangles":3108,"fragments":259,"warnings":0,"candidate_pairs":65,"rejected_pairs":8127}
-{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":516351,"min_ns":112000,"p50_ns":363900,"p95_ns":983900,"max_ns":4876400,"triangles":3108,"fragments":259,"warnings":0,"candidate_pairs":65,"rejected_pairs":8127}
-{"kernel":"vg_csg","mode":"stable","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":240,"min_ns":200,"p50_ns":200,"p95_ns":300,"max_ns":500,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
-{"kernel":"vg_csg","mode":"dirty","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":52087,"min_ns":35900,"p50_ns":44800,"p95_ns":56700,"max_ns":281000,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
-{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":35528,"min_ns":32200,"p50_ns":32500,"p95_ns":47000,"max_ns":50000,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
+{"kernel":"vg_csg","mode":"stable","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":506,"min_ns":500,"p50_ns":500,"p95_ns":500,"max_ns":800,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"dirty","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":3937,"min_ns":3700,"p50_ns":3800,"p95_ns":4100,"max_ns":12700,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":4204,"min_ns":4000,"p50_ns":4100,"p95_ns":5100,"max_ns":6000,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"stable","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":68625,"min_ns":41300,"p50_ns":62600,"p95_ns":99600,"max_ns":150000,"triangles":3072,"fragments":256,"warnings":0,"candidate_pairs":64,"rejected_pairs":8128}
+{"kernel":"vg_csg","mode":"dirty","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":817095,"min_ns":428800,"p50_ns":664300,"p95_ns":1392000,"max_ns":3642000,"triangles":3108,"fragments":259,"warnings":0,"candidate_pairs":65,"rejected_pairs":8127}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":104501,"min_ns":45200,"p50_ns":61400,"p95_ns":283600,"max_ns":374000,"triangles":3108,"fragments":259,"warnings":0,"candidate_pairs":65,"rejected_pairs":8127}
+{"kernel":"vg_csg","mode":"stable","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":14776,"min_ns":9500,"p50_ns":10300,"p95_ns":14200,"max_ns":233700,"triangles":3404,"fragments":280,"warnings":0,"candidate_pairs":804,"rejected_pairs":9417}
+{"kernel":"vg_csg","mode":"dirty","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":3490834,"min_ns":2233100,"p50_ns":3133400,"p95_ns":5120800,"max_ns":6423700,"triangles":3404,"fragments":280,"warnings":0,"candidate_pairs":805,"rejected_pairs":9416}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":415318,"min_ns":242200,"p50_ns":305100,"p95_ns":874600,"max_ns":1777700,"triangles":3404,"fragments":280,"warnings":0,"candidate_pairs":805,"rejected_pairs":9416}
+{"kernel":"vg_csg","mode":"stable","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":651,"min_ns":500,"p50_ns":600,"p95_ns":700,"max_ns":800,"triangles":45,"fragments":1,"warnings":0,"candidate_pairs":63,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"dirty","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":488343,"min_ns":360200,"p50_ns":394100,"p95_ns":832100,"max_ns":1936700,"triangles":45,"fragments":1,"warnings":0,"candidate_pairs":63,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":10150,"min_ns":9500,"p50_ns":9600,"p95_ns":13100,"max_ns":17200,"triangles":45,"fragments":1,"warnings":0,"candidate_pairs":63,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"stable","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":218,"min_ns":200,"p50_ns":200,"p95_ns":300,"max_ns":400,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
+{"kernel":"vg_csg","mode":"dirty","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":110825,"min_ns":35700,"p50_ns":52200,"p95_ns":115600,"max_ns":2843900,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":2856,"min_ns":2400,"p50_ns":2500,"p95_ns":3600,"max_ns":4100,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
 ```
 
-Tail-edit lesson: prefix caching cuts the big box-room dirty mean by roughly a
-third and distant-cutter dirty mean by roughly a third. The single-cut case is
-slower because cache machinery dominates, and rotated/non-box cases still use
-the full path. The next hard target is cached mesh emission or dirty output
-patching; replaying less CSG work is not enough if every edit still serializes
-the whole result mesh.
+Tail-edit lesson: prefix caching cuts the room-grid dirty mean by roughly 7.8x,
+the rotated-stack dirty mean by roughly 8.4x, the common-box chain by roughly
+48x, and the distant-cutter case by roughly 39x. The single-cut case is still
+slightly slower because cache machinery dominates. The next hard target is
+cached mesh emission or dirty output patching; replaying less CSG work is not
+enough if every edit still serializes the whole result mesh.

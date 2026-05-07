@@ -92,7 +92,11 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     if matches!(mode, PerfMode::Routed) && !assembler.supports_routed_surfaces() {
         return;
     }
-    let warmup = assembler.build();
+    let warmup = if matches!(mode, PerfMode::IncrementalDirty) {
+        assembler.build_incremental()
+    } else {
+        assembler.build()
+    };
     black_box(warmup.mesh.triangle_count());
 
     for _ in 0..WARMUP_ITERS {

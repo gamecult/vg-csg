@@ -38,6 +38,7 @@ pub struct Assembler {
     compiled: Vec<CompiledBrush>,
     cache: RefCell<Option<BuildOutput>>,
     box_cache: RefCell<Option<BoxBuildCache>>,
+    general_cache: RefCell<Option<GeneralBuildCache>>,
     first_dirty_index: RefCell<Option<usize>>,
     next_id: u32,
     generation: u64,
@@ -83,12 +84,27 @@ enum CompiledGeometry {
 #[derive(Clone, Debug, Default)]
 struct BoxBuildCache {
     generation: u64,
+    valid_checkpoint_index: usize,
     checkpoints: Vec<BoxBuildState>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct BoxBuildState {
     boxes: Vec<(Aabb, MaterialId)>,
+    report: BuildReport,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GeneralBuildCache {
+    generation: u64,
+    valid_checkpoint_index: usize,
+    checkpoints: Vec<GeneralBuildState>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GeneralBuildState {
+    mesh: TriangleMesh,
+    solids: Vec<ConvexSolid>,
     report: BuildReport,
 }
 
@@ -258,7 +274,7 @@ impl Assembler {
         let first_dirty_index = *self.first_dirty_index.borrow();
         let output = self
             .try_build_axis_aligned_boxes_from_cache(first_dirty_index)
-            .unwrap_or_else(|| self.build_uncached());
+            .unwrap_or_else(|| self.build_general_from_cache(first_dirty_index));
         *self.cache.borrow_mut() = Some(output.clone());
         *self.first_dirty_index.borrow_mut() = None;
         output
@@ -272,7 +288,7 @@ impl Assembler {
             .dirty_frontier_for_indices(dirty_indices)
             .first_dirty_index;
         self.try_build_axis_aligned_boxes_from_cache(first_dirty_index)
-            .unwrap_or_else(|| self.build_uncached())
+            .unwrap_or_else(|| self.build_general_from_cache(first_dirty_index))
     }
 
     pub fn rebuild_incremental_for_brushes(
@@ -407,131 +423,15 @@ impl Assembler {
             return self.build_axis_aligned_boxes();
         }
 
-        let mut report = BuildReport {
-            input_brushes: self.brushes.len(),
-            ..BuildReport::default()
-        };
-        let mut mesh = TriangleMesh::new();
-        let mut solids: Vec<ConvexSolid> = Vec::new();
+        self.build_general_direct()
+    }
 
+    fn build_general_direct(&self) -> BuildOutput {
+        let mut state = GeneralBuildState::default();
         for brush in &self.compiled {
-            match brush.op {
-                BrushOp::Add => match &brush.geometry {
-                    CompiledGeometry::Box(bounds) => {
-                        solids.push(ConvexSolid::from_aabb(*bounds, brush.material));
-                    }
-                    CompiledGeometry::Convex(solid) => solids.push(solid.clone()),
-                    CompiledGeometry::CylinderZ {
-                        center,
-                        radius,
-                        depth,
-                        segments,
-                    } => append_cylinder_z(
-                        &mut mesh,
-                        *center,
-                        *radius,
-                        *depth,
-                        *segments,
-                        brush.material,
-                    ),
-                    CompiledGeometry::DomeCapZ {
-                        center,
-                        radius,
-                        height,
-                        rings,
-                        segments,
-                    } => append_dome_cap_z(
-                        &mut mesh,
-                        DomeCapZSpec {
-                            center: *center,
-                            radius: *radius,
-                            height: *height,
-                            rings: *rings,
-                            segments: *segments,
-                            material: brush.material,
-                        },
-                    ),
-                    CompiledGeometry::FloretArm {
-                        anchor,
-                        direction,
-                        length,
-                        root_width,
-                        tip_width,
-                        thickness,
-                        tip_lift,
-                    } => append_floret_arm(
-                        &mut mesh,
-                        FloretArmSpec {
-                            anchor: *anchor,
-                            direction: *direction,
-                            length: *length,
-                            root_width: *root_width,
-                            tip_width: *tip_width,
-                            thickness: *thickness,
-                            tip_lift: *tip_lift,
-                            material: brush.material,
-                        },
-                    ),
-                },
-                BrushOp::Subtract => {
-                    report.operator_brushes += 1;
-                    if !brush
-                        .bounds
-                        .intersects_any(solids.iter().map(|solid| solid.bounds))
-                    {
-                        report.rejected_pairs += solids.len();
-                        continue;
-                    }
-                    if let Some(cutter) = brush.convex_cutter() {
-                        solids = subtract_from_solids(solids, &cutter, &mut report);
-                    } else {
-                        let has_candidate = record_solid_pairs(&solids, brush.bounds, &mut report);
-                        if has_candidate {
-                            report
-                                .warnings
-                                .push(BuildWarning::SubtractIgnoredForNonBox {
-                                    brush: brush.name.clone(),
-                                });
-                        }
-                    }
-                }
-                BrushOp::Intersect => {
-                    report.operator_brushes += 1;
-                    if !brush
-                        .bounds
-                        .intersects_any(solids.iter().map(|solid| solid.bounds))
-                    {
-                        report.rejected_pairs += solids.len();
-                        solids.clear();
-                        continue;
-                    }
-                    if let Some(cutter) = brush.convex_cutter() {
-                        solids = intersect_solids(solids, &cutter, &mut report);
-                    } else {
-                        let has_candidate = record_solid_pairs(&solids, brush.bounds, &mut report);
-                        solids.clear();
-                        if has_candidate {
-                            report
-                                .warnings
-                                .push(BuildWarning::IntersectIgnoredForNonBox {
-                                    brush: brush.name.clone(),
-                                });
-                        }
-                    }
-                }
-            }
+            state.apply_compiled_brush(brush);
         }
-
-        report.emitted_convex_fragments = solids.len();
-        for solid in solids {
-            solid.append_to_mesh(&mut mesh);
-        }
-
-        BuildOutput {
-            mesh,
-            report,
-            generation: self.generation,
-        }
+        state.into_output(self.brushes.len(), self.generation)
     }
 
     fn build_axis_aligned_boxes(&self) -> BuildOutput {
@@ -560,6 +460,7 @@ impl Assembler {
                 .as_ref()
                 .filter(|cache| {
                     cache.generation == self.generation
+                        && cache.valid_checkpoint_index == brush_count
                         && cache.checkpoints.len() == brush_count + 1
                 })
                 .map_or(0, |_| brush_count),
@@ -568,6 +469,7 @@ impl Assembler {
             .box_cache
             .borrow()
             .as_ref()
+            .filter(|cache| rebuild_from <= cache.valid_checkpoint_index)
             .and_then(|cache| cache.checkpoints.get(rebuild_from).cloned());
         let (mut state, start_index) = if let Some(state) = cached_state {
             (state, rebuild_from)
@@ -575,32 +477,77 @@ impl Assembler {
             (BoxBuildState::default(), 0)
         };
 
-        let mut checkpoints = self
-            .box_cache
-            .borrow()
-            .as_ref()
-            .map(|cache| {
-                cache
-                    .checkpoints
-                    .iter()
-                    .take(start_index + 1)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .filter(|checkpoints| checkpoints.len() == start_index + 1)
-            .unwrap_or_else(|| vec![BoxBuildState::default()]);
+        let mut checkpoints = (start_index == 0).then(|| vec![BoxBuildState::default()]);
 
         for brush in &self.compiled[start_index..] {
             state.apply_compiled_box(brush);
-            checkpoints.push(state.clone());
+            if let Some(checkpoints) = &mut checkpoints {
+                checkpoints.push(state.clone());
+            }
         }
 
-        *self.box_cache.borrow_mut() = Some(BoxBuildCache {
-            generation: self.generation,
-            checkpoints,
-        });
+        if let Some(checkpoints) = checkpoints {
+            *self.box_cache.borrow_mut() = Some(BoxBuildCache {
+                generation: self.generation,
+                valid_checkpoint_index: brush_count,
+                checkpoints,
+            });
+        } else if let Some(cache) = self.box_cache.borrow_mut().as_mut() {
+            cache.generation = self.generation;
+            cache.valid_checkpoint_index = cache.valid_checkpoint_index.min(start_index);
+        }
 
         Some(state.into_output(self.brushes.len(), self.generation))
+    }
+
+    fn build_general_from_cache(&self, first_dirty_index: Option<usize>) -> BuildOutput {
+        let brush_count = self.compiled.len();
+        let rebuild_from = match first_dirty_index {
+            Some(index) => index.min(brush_count),
+            None => self
+                .general_cache
+                .borrow()
+                .as_ref()
+                .filter(|cache| {
+                    cache.generation == self.generation
+                        && cache.valid_checkpoint_index == brush_count
+                        && cache.checkpoints.len() == brush_count + 1
+                })
+                .map_or(0, |_| brush_count),
+        };
+        let cached_state = self
+            .general_cache
+            .borrow()
+            .as_ref()
+            .filter(|cache| rebuild_from <= cache.valid_checkpoint_index)
+            .and_then(|cache| cache.checkpoints.get(rebuild_from).cloned());
+        let (mut state, start_index) = if let Some(state) = cached_state {
+            (state, rebuild_from)
+        } else {
+            (GeneralBuildState::default(), 0)
+        };
+
+        let mut checkpoints = (start_index == 0).then(|| vec![GeneralBuildState::default()]);
+
+        for brush in &self.compiled[start_index..] {
+            state.apply_compiled_brush(brush);
+            if let Some(checkpoints) = &mut checkpoints {
+                checkpoints.push(state.clone());
+            }
+        }
+
+        if let Some(checkpoints) = checkpoints {
+            *self.general_cache.borrow_mut() = Some(GeneralBuildCache {
+                generation: self.generation,
+                valid_checkpoint_index: brush_count,
+                checkpoints,
+            });
+        } else if let Some(cache) = self.general_cache.borrow_mut().as_mut() {
+            cache.generation = self.generation;
+            cache.valid_checkpoint_index = cache.valid_checkpoint_index.min(start_index);
+        }
+
+        state.into_output(self.brushes.len(), self.generation)
     }
 
     pub fn sample_room_with_door() -> Self {
@@ -768,6 +715,145 @@ impl BoxBuildState {
 
         BuildOutput {
             mesh,
+            report: self.report,
+            generation,
+        }
+    }
+}
+
+impl GeneralBuildState {
+    fn apply_compiled_brush(&mut self, brush: &CompiledBrush) {
+        match brush.op {
+            BrushOp::Add => self.add_brush_geometry(brush),
+            BrushOp::Subtract => {
+                self.report.operator_brushes += 1;
+                if !brush
+                    .bounds
+                    .intersects_any(self.solids.iter().map(|solid| solid.bounds))
+                {
+                    self.report.rejected_pairs += self.solids.len();
+                    return;
+                }
+                if let Some(cutter) = brush.convex_cutter() {
+                    self.solids = subtract_from_solids(
+                        std::mem::take(&mut self.solids),
+                        &cutter,
+                        &mut self.report,
+                    );
+                } else {
+                    let has_candidate =
+                        record_solid_pairs(&self.solids, brush.bounds, &mut self.report);
+                    if has_candidate {
+                        self.report
+                            .warnings
+                            .push(BuildWarning::SubtractIgnoredForNonBox {
+                                brush: brush.name.clone(),
+                            });
+                    }
+                }
+            }
+            BrushOp::Intersect => {
+                self.report.operator_brushes += 1;
+                if !brush
+                    .bounds
+                    .intersects_any(self.solids.iter().map(|solid| solid.bounds))
+                {
+                    self.report.rejected_pairs += self.solids.len();
+                    self.solids.clear();
+                    return;
+                }
+                if let Some(cutter) = brush.convex_cutter() {
+                    self.solids = intersect_solids(
+                        std::mem::take(&mut self.solids),
+                        &cutter,
+                        &mut self.report,
+                    );
+                } else {
+                    let has_candidate =
+                        record_solid_pairs(&self.solids, brush.bounds, &mut self.report);
+                    self.solids.clear();
+                    if has_candidate {
+                        self.report
+                            .warnings
+                            .push(BuildWarning::IntersectIgnoredForNonBox {
+                                brush: brush.name.clone(),
+                            });
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_brush_geometry(&mut self, brush: &CompiledBrush) {
+        match &brush.geometry {
+            CompiledGeometry::Box(bounds) => {
+                self.solids
+                    .push(ConvexSolid::from_aabb(*bounds, brush.material));
+            }
+            CompiledGeometry::Convex(solid) => self.solids.push(solid.clone()),
+            CompiledGeometry::CylinderZ {
+                center,
+                radius,
+                depth,
+                segments,
+            } => append_cylinder_z(
+                &mut self.mesh,
+                *center,
+                *radius,
+                *depth,
+                *segments,
+                brush.material,
+            ),
+            CompiledGeometry::DomeCapZ {
+                center,
+                radius,
+                height,
+                rings,
+                segments,
+            } => append_dome_cap_z(
+                &mut self.mesh,
+                DomeCapZSpec {
+                    center: *center,
+                    radius: *radius,
+                    height: *height,
+                    rings: *rings,
+                    segments: *segments,
+                    material: brush.material,
+                },
+            ),
+            CompiledGeometry::FloretArm {
+                anchor,
+                direction,
+                length,
+                root_width,
+                tip_width,
+                thickness,
+                tip_lift,
+            } => append_floret_arm(
+                &mut self.mesh,
+                FloretArmSpec {
+                    anchor: *anchor,
+                    direction: *direction,
+                    length: *length,
+                    root_width: *root_width,
+                    tip_width: *tip_width,
+                    thickness: *thickness,
+                    tip_lift: *tip_lift,
+                    material: brush.material,
+                },
+            ),
+        }
+    }
+
+    fn into_output(mut self, input_brushes: usize, generation: u64) -> BuildOutput {
+        self.report.input_brushes = input_brushes;
+        self.report.emitted_convex_fragments = self.solids.len();
+        for solid in self.solids {
+            solid.append_to_mesh(&mut self.mesh);
+        }
+
+        BuildOutput {
+            mesh: self.mesh,
             report: self.report,
             generation,
         }
@@ -1186,7 +1272,7 @@ mod tests {
             "late",
             Aabb::from_center_size(Vec3::new(2.0, 0.0, 0.0), Vec3::splat(2.0)),
         );
-        asm.build();
+        asm.build_incremental();
 
         assert!(asm.set_brush_primitive(
             dirty,
@@ -1195,6 +1281,51 @@ mod tests {
             },
         ));
         let incremental = asm.rebuild_incremental_for_brushes([dirty]);
+        let full = asm.rebuild();
+
+        assert_eq!(incremental.mesh.positions, full.mesh.positions);
+        assert_eq!(incremental.mesh.indices, full.mesh.indices);
+        assert_eq!(
+            incremental.report.candidate_pairs,
+            full.report.candidate_pairs
+        );
+        assert_eq!(
+            incremental.report.rejected_pairs,
+            full.report.rejected_pairs
+        );
+    }
+
+    #[test]
+    fn incremental_convex_rebuild_matches_full_rebuild() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "slab",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::new(16.0, 16.0, 4.0)),
+            MaterialId(1),
+        );
+
+        let mut tail = BrushId(0);
+        for index in 0..12 {
+            let angle = index as f32 * 0.217;
+            let center = Vec3::new(angle.cos() * 4.0, angle.sin() * 4.0, 0.0);
+            tail = asm.cut_oriented_box(
+                format!("rotated_void_{index}"),
+                center,
+                Vec3::new(1.0, 6.0, 5.0),
+                bevy_math::Quat::from_rotation_z(angle),
+            );
+        }
+        asm.build_incremental();
+
+        assert!(asm.set_brush_primitive(
+            tail,
+            Primitive::OrientedBox {
+                center: Vec3::new(3.0, 0.0, 0.0),
+                size: Vec3::new(1.25, 6.0, 5.0),
+                rotation: bevy_math::Quat::from_rotation_z(0.5),
+            },
+        ));
+        let incremental = asm.build_incremental();
         let full = asm.rebuild();
 
         assert_eq!(incremental.mesh.positions, full.mesh.positions);
