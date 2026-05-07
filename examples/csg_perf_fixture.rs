@@ -110,6 +110,7 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let mut warnings = 0;
     let mut candidate_pairs = 0;
     let mut rejected_pairs = 0;
+    let mut reused_mesh = false;
 
     for iteration in 0..MEASURE_ITERS {
         let start = Instant::now();
@@ -120,12 +121,14 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         warnings = output.report.warnings.len();
         candidate_pairs = output.report.candidate_pairs;
         rejected_pairs = output.report.rejected_pairs;
+        reused_mesh = output.report.reused_mesh;
         black_box((
             triangles,
             fragments,
             warnings,
             candidate_pairs,
             rejected_pairs,
+            reused_mesh,
         ));
         timings.push(elapsed);
     }
@@ -141,7 +144,7 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let p95_ns = percentile_ns(&timings, 95);
 
     println!(
-        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{},\"candidate_pairs\":{},\"rejected_pairs\":{}}}",
+        "{{\"kernel\":\"vg_csg\",\"mode\":\"{}\",\"scenario\":\"{}\",\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"fragments\":{},\"warnings\":{},\"candidate_pairs\":{},\"rejected_pairs\":{},\"reused_mesh\":{}}}",
         mode.as_str(),
         case.name,
         case.brushes,
@@ -156,7 +159,8 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         fragments,
         warnings,
         candidate_pairs,
-        rejected_pairs
+        rejected_pairs,
+        reused_mesh
     );
 }
 

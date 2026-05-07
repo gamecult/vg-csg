@@ -29,7 +29,7 @@ impl Plane {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConvexPolygon {
     pub vertices: Vec<Vec3>,
     pub normal: Vec3,
@@ -73,7 +73,7 @@ impl ConvexPolygon {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConvexSolid {
     pub polygons: Vec<ConvexPolygon>,
     pub clip_planes: Vec<Plane>,

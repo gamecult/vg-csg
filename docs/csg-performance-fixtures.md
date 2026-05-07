@@ -130,6 +130,12 @@ suffix. The result is parity-checked against a full rebuild. Cache validity is
 tracked as a prefix boundary so repeated edits do not deep-copy stale
 checkpoints. Final mesh emission is still whole-output.
 
+Mesh reuse seam: incremental rebuilds now keep the previous generation's cached
+mesh and reuse it only when suffix replay proves no geometry was touched. This
+is intentionally exact and conservative: distant rejected edits can skip mesh
+emission, while candidate cuts still emit the full output mesh. The report
+exposes `reused_mesh` so the fixture and tests do not infer reuse from timing.
+
 ## Latest Local Baseline
 
 Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
@@ -190,7 +196,9 @@ falls back to full replay only when no valid checkpoint exists.
 
 Tail-edit lesson: prefix caching cuts the room-grid dirty mean by roughly 7.8x,
 the rotated-stack dirty mean by roughly 8.4x, the common-box chain by roughly
-48x, and the distant-cutter case by roughly 39x. The single-cut case is still
+48x, and the distant-cutter case by roughly 39x in this run. A follow-up mesh
+reuse seam pushed distant rejected edits into low microseconds by reusing the
+previous mesh when no geometry was touched. The single-cut case is still
 slightly slower because cache machinery dominates. The next hard target is
-cached mesh emission or dirty output patching; replaying less CSG work is not
-enough if every edit still serializes the whole result mesh.
+dirty mesh range patching for candidate edits; replaying less CSG work is not
+enough when every real cut still serializes the whole result mesh.

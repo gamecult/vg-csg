@@ -15,13 +15,14 @@ pub enum BuildWarning {
     IntersectIgnoredForNonBox { brush: String },
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BuildReport {
     pub input_brushes: usize,
     pub emitted_convex_fragments: usize,
     pub operator_brushes: usize,
     pub candidate_pairs: usize,
     pub rejected_pairs: usize,
+    pub reused_mesh: bool,
     pub warnings: Vec<BuildWarning>,
 }
 
@@ -88,7 +89,7 @@ struct BoxBuildCache {
     checkpoints: Vec<BoxBuildState>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct BoxBuildState {
     boxes: Vec<(Aabb, MaterialId)>,
     report: BuildReport,
@@ -101,7 +102,7 @@ struct GeneralBuildCache {
     checkpoints: Vec<GeneralBuildState>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct GeneralBuildState {
     mesh: TriangleMesh,
     solids: Vec<ConvexSolid>,
@@ -157,7 +158,6 @@ impl Assembler {
         self.compiled.push(CompiledBrush::from_brush(&brush));
         self.brushes.push(brush);
         self.generation = self.generation.wrapping_add(1);
-        self.cache.borrow_mut().take();
         self.mark_dirty_index(index);
         id
     }
@@ -170,7 +170,6 @@ impl Assembler {
         self.brushes[index].set_dirty();
         self.compiled[index] = CompiledBrush::from_brush(&self.brushes[index]);
         self.generation = self.generation.wrapping_add(1);
-        self.cache.borrow_mut().take();
         self.mark_dirty_index(index);
         true
     }
@@ -183,7 +182,6 @@ impl Assembler {
         self.brushes[index].set_dirty();
         self.compiled[index] = CompiledBrush::from_brush(&self.brushes[index]);
         self.generation = self.generation.wrapping_add(1);
-        self.cache.borrow_mut().take();
         self.mark_dirty_index(index);
         true
     }
@@ -452,6 +450,7 @@ impl Assembler {
         }
 
         let brush_count = self.compiled.len();
+        let previous_output = self.cache.borrow().as_ref().cloned();
         let rebuild_from = match first_dirty_index {
             Some(index) => index.min(brush_count),
             None => self
@@ -479,8 +478,9 @@ impl Assembler {
 
         let mut checkpoints = (start_index == 0).then(|| vec![BoxBuildState::default()]);
 
+        let mut changed_geometry = start_index == 0;
         for brush in &self.compiled[start_index..] {
-            state.apply_compiled_box(brush);
+            changed_geometry |= state.apply_compiled_box(brush);
             if let Some(checkpoints) = &mut checkpoints {
                 checkpoints.push(state.clone());
             }
@@ -497,11 +497,16 @@ impl Assembler {
             cache.valid_checkpoint_index = cache.valid_checkpoint_index.min(start_index);
         }
 
-        Some(state.into_output(self.brushes.len(), self.generation))
+        let reused_mesh = (!changed_geometry)
+            .then_some(previous_output)
+            .flatten()
+            .map(|output| output.mesh);
+        Some(state.into_output_with_mesh(self.brushes.len(), self.generation, reused_mesh))
     }
 
     fn build_general_from_cache(&self, first_dirty_index: Option<usize>) -> BuildOutput {
         let brush_count = self.compiled.len();
+        let previous_output = self.cache.borrow().as_ref().cloned();
         let rebuild_from = match first_dirty_index {
             Some(index) => index.min(brush_count),
             None => self
@@ -529,8 +534,9 @@ impl Assembler {
 
         let mut checkpoints = (start_index == 0).then(|| vec![GeneralBuildState::default()]);
 
+        let mut changed_geometry = start_index == 0;
         for brush in &self.compiled[start_index..] {
-            state.apply_compiled_brush(brush);
+            changed_geometry |= state.apply_compiled_brush(brush);
             if let Some(checkpoints) = &mut checkpoints {
                 checkpoints.push(state.clone());
             }
@@ -547,7 +553,11 @@ impl Assembler {
             cache.valid_checkpoint_index = cache.valid_checkpoint_index.min(start_index);
         }
 
-        state.into_output(self.brushes.len(), self.generation)
+        let reused_mesh = (!changed_geometry)
+            .then_some(previous_output)
+            .flatten()
+            .map(|output| output.mesh);
+        state.into_output_with_mesh(self.brushes.len(), self.generation, reused_mesh)
     }
 
     pub fn sample_room_with_door() -> Self {
@@ -649,18 +659,21 @@ impl CompiledBrush {
 }
 
 impl BoxBuildState {
-    fn apply_compiled_box(&mut self, brush: &CompiledBrush) {
+    fn apply_compiled_box(&mut self, brush: &CompiledBrush) -> bool {
         let CompiledGeometry::Box(bounds) = brush.geometry else {
             unreachable!("box build state received a non-box brush");
         };
 
         match brush.op {
-            BrushOp::Add => self.boxes.push((bounds, brush.material)),
+            BrushOp::Add => {
+                self.boxes.push((bounds, brush.material));
+                true
+            }
             BrushOp::Subtract => {
                 self.report.operator_brushes += 1;
                 if !bounds.intersects_any(self.boxes.iter().map(|(bounds, _)| *bounds)) {
                     self.report.rejected_pairs += self.boxes.len();
-                    return;
+                    return false;
                 }
 
                 let mut out = Vec::with_capacity(self.boxes.len() + 4);
@@ -679,13 +692,15 @@ impl BoxBuildState {
                     }
                 }
                 self.boxes = out;
+                true
             }
             BrushOp::Intersect => {
                 self.report.operator_brushes += 1;
                 if !bounds.intersects_any(self.boxes.iter().map(|(bounds, _)| *bounds)) {
+                    let changed = !self.boxes.is_empty();
                     self.report.rejected_pairs += self.boxes.len();
                     self.boxes.clear();
-                    return;
+                    return changed;
                 }
 
                 self.boxes = self
@@ -701,16 +716,27 @@ impl BoxBuildState {
                         }
                     })
                     .collect();
+                true
             }
         }
     }
 
-    fn into_output(mut self, input_brushes: usize, generation: u64) -> BuildOutput {
+    fn into_output_with_mesh(
+        mut self,
+        input_brushes: usize,
+        generation: u64,
+        reused_mesh: Option<TriangleMesh>,
+    ) -> BuildOutput {
         let mut mesh = TriangleMesh::new();
         self.report.input_brushes = input_brushes;
         self.report.emitted_convex_fragments = self.boxes.len();
-        for (bounds, material) in self.boxes {
-            mesh.append_box(bounds, material);
+        if let Some(reused_mesh) = reused_mesh {
+            self.report.reused_mesh = true;
+            mesh = reused_mesh;
+        } else {
+            for (bounds, material) in self.boxes {
+                mesh.append_box(bounds, material);
+            }
         }
 
         BuildOutput {
@@ -722,9 +748,12 @@ impl BoxBuildState {
 }
 
 impl GeneralBuildState {
-    fn apply_compiled_brush(&mut self, brush: &CompiledBrush) {
+    fn apply_compiled_brush(&mut self, brush: &CompiledBrush) -> bool {
         match brush.op {
-            BrushOp::Add => self.add_brush_geometry(brush),
+            BrushOp::Add => {
+                self.add_brush_geometry(brush);
+                true
+            }
             BrushOp::Subtract => {
                 self.report.operator_brushes += 1;
                 if !brush
@@ -732,7 +761,7 @@ impl GeneralBuildState {
                     .intersects_any(self.solids.iter().map(|solid| solid.bounds))
                 {
                     self.report.rejected_pairs += self.solids.len();
-                    return;
+                    return false;
                 }
                 if let Some(cutter) = brush.convex_cutter() {
                     self.solids = subtract_from_solids(
@@ -740,6 +769,7 @@ impl GeneralBuildState {
                         &cutter,
                         &mut self.report,
                     );
+                    true
                 } else {
                     let has_candidate =
                         record_solid_pairs(&self.solids, brush.bounds, &mut self.report);
@@ -750,6 +780,7 @@ impl GeneralBuildState {
                                 brush: brush.name.clone(),
                             });
                     }
+                    false
                 }
             }
             BrushOp::Intersect => {
@@ -758,9 +789,10 @@ impl GeneralBuildState {
                     .bounds
                     .intersects_any(self.solids.iter().map(|solid| solid.bounds))
                 {
+                    let changed = !self.solids.is_empty();
                     self.report.rejected_pairs += self.solids.len();
                     self.solids.clear();
-                    return;
+                    return changed;
                 }
                 if let Some(cutter) = brush.convex_cutter() {
                     self.solids = intersect_solids(
@@ -768,9 +800,11 @@ impl GeneralBuildState {
                         &cutter,
                         &mut self.report,
                     );
+                    true
                 } else {
                     let has_candidate =
                         record_solid_pairs(&self.solids, brush.bounds, &mut self.report);
+                    let changed = !self.solids.is_empty();
                     self.solids.clear();
                     if has_candidate {
                         self.report
@@ -779,6 +813,7 @@ impl GeneralBuildState {
                                 brush: brush.name.clone(),
                             });
                     }
+                    changed
                 }
             }
         }
@@ -845,11 +880,25 @@ impl GeneralBuildState {
         }
     }
 
-    fn into_output(mut self, input_brushes: usize, generation: u64) -> BuildOutput {
+    fn into_output(self, input_brushes: usize, generation: u64) -> BuildOutput {
+        self.into_output_with_mesh(input_brushes, generation, None)
+    }
+
+    fn into_output_with_mesh(
+        mut self,
+        input_brushes: usize,
+        generation: u64,
+        reused_mesh: Option<TriangleMesh>,
+    ) -> BuildOutput {
         self.report.input_brushes = input_brushes;
         self.report.emitted_convex_fragments = self.solids.len();
-        for solid in self.solids {
-            solid.append_to_mesh(&mut self.mesh);
+        if let Some(reused_mesh) = reused_mesh {
+            self.report.reused_mesh = true;
+            self.mesh = reused_mesh;
+        } else {
+            for solid in self.solids {
+                solid.append_to_mesh(&mut self.mesh);
+            }
         }
 
         BuildOutput {
@@ -1293,6 +1342,34 @@ mod tests {
             incremental.report.rejected_pairs,
             full.report.rejected_pairs
         );
+    }
+
+    #[test]
+    fn incremental_distant_tail_edit_reuses_previous_mesh() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(8.0)),
+            MaterialId(1),
+        );
+        let far = asm.cut_box(
+            "far",
+            Aabb::from_center_size(Vec3::splat(100.0), Vec3::splat(1.0)),
+        );
+        let before = asm.build_incremental();
+
+        assert!(asm.set_brush_primitive(
+            far,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::splat(120.0), Vec3::splat(1.0)),
+            },
+        ));
+        let after = asm.build_incremental();
+
+        assert_eq!(after.mesh, before.mesh);
+        assert!(after.report.reused_mesh);
+        assert_eq!(after.report.candidate_pairs, 0);
+        assert_eq!(after.report.rejected_pairs, 1);
     }
 
     #[test]

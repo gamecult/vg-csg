@@ -2,7 +2,7 @@ use bevy_math::{Vec2, Vec3};
 
 use crate::{Aabb, MaterialId};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TriangleMesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
