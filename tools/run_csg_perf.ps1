@@ -13,7 +13,7 @@ New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
 Push-Location $root
 try {
-    cargo build --release -p vg_csg --example csg_perf_fixture | Out-Host
+    cargo build --release --example csg_perf_fixture | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "vg_csg perf fixture build failed with exit code $LASTEXITCODE"
     }

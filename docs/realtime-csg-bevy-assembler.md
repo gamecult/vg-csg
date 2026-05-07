@@ -41,7 +41,7 @@ to Bevy render assets.
 
 ## Current Port Shape
 
-`crates/vg_csg` is the first lean Rust organ.
+`vg-csg` is the first lean Rust organ.
 
 It uses `bevy_math` for `Vec3`, `Vec2`, and Bevy-compatible spatial types while
 keeping output as simple arrays:
@@ -94,7 +94,7 @@ should preserve brush polygons, classify them through the tree, and emit only
 the visible categories.
 
 The expanded doctrine lives in
-`docs/research/realtime-csg-doctrine.md`; keep this file focused on the current
+`docs/realtime-csg-doctrine.md`; keep this file focused on the current
 crate shape.
 
 Procedural non-CSG primitives are additive:
@@ -182,7 +182,7 @@ So the near-term spatial plan is:
 Sideways version: do not ask every cutter whether it matters. Ask the branch,
 dirty region, and requested output which pairs deserve to exist this frame.
 
-Performance fixtures live in `docs/research/csg-performance-fixtures.md` and
+Performance fixtures live in `docs/csg-performance-fixtures.md` and
 `tools/run_csg_perf.ps1`. They time our release fixture now and reserve a JSONL
 slot for a public-demo/reference harness when one is available.
 

@@ -181,7 +181,7 @@ for the real engine.
 ## Incremental Dirty Smoke Run
 
 Captured on 2026-05-07 with
-`cargo run -p vg_csg --release --example csg_perf_fixture`. Dirty modes mutate
+`cargo run --release --example csg_perf_fixture`. Dirty modes mutate
 the tail brush each iteration. `incremental_dirty` uses prefix checkpoints and
 falls back to full replay only when no valid checkpoint exists.
 

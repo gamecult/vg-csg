@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Lean Bevy-math constructive geometry assembler for VibeGeometry blockouts"
 license = "MIT"
+repository = "https://github.com/GameCult/vg-csg"
+readme = "README.md"
 
 [dependencies]
 bevy_math = "0.17"

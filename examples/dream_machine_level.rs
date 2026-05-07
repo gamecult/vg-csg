@@ -347,8 +347,6 @@ fn seeded_wave(value: f32) -> f32 {
 
 fn output_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
         .join("experiments")
         .join("generated")
         .join("dream_machine_level")

@@ -728,8 +728,6 @@ fn polar_point(radius: f32, angle: f32, z: f32) -> Vec3 {
 
 fn output_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
         .join("experiments")
         .join("generated")
         .join("industrial_maintenance_loop")
