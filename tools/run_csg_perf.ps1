@@ -1,6 +1,7 @@
 param(
     [string]$OutputPath = ".\experiments\generated\csg-perf-latest.jsonl",
-    [string]$ReferenceCommand = $env:VIBEGEOMETRY_REFERENCE_CSG_PERF
+    [string]$ReferenceCommand = $env:VIBEGEOMETRY_REFERENCE_CSG_PERF,
+    [switch]$UseRealtimeCsgCpp
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +14,9 @@ New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 Push-Location $root
 try {
     cargo build --release -p vg_csg --example csg_perf_fixture | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "vg_csg perf fixture build failed with exit code $LASTEXITCODE"
+    }
 
     $exe = Join-Path $root "target\release\examples\csg_perf_fixture.exe"
     if (!(Test-Path $exe)) {
@@ -20,8 +24,18 @@ try {
     }
 
     & $exe | Set-Content -Path $resolvedOutput -Encoding utf8
+    if ($LASTEXITCODE -ne 0) {
+        throw "vg_csg perf fixture failed with exit code $LASTEXITCODE"
+    }
 
-    if ($ReferenceCommand) {
+    if ($UseRealtimeCsgCpp) {
+        $nativeOutput = ".\experiments\generated\realtimecsg-cpp-perf-latest.jsonl"
+        & (Join-Path $root ".\tools\run_realtimecsg_cpp_perf.ps1") -OutputPath $nativeOutput | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "RealtimeCSG C++ perf fixture failed with exit code $LASTEXITCODE"
+        }
+        Get-Content -Path $nativeOutput | Add-Content -Path $resolvedOutput -Encoding utf8
+    } elseif ($ReferenceCommand) {
         $referenceOutput = & cmd /c $ReferenceCommand
         foreach ($line in $referenceOutput) {
             Add-Content -Path $resolvedOutput -Value $line -Encoding utf8
