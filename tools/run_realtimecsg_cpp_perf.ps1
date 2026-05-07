@@ -1,6 +1,8 @@
 param(
     [string]$OutputPath = ".\experiments\generated\realtimecsg-cpp-perf-latest.jsonl",
-    [string]$PluginDll = ".\experiments\source-repos\realtime-CSG-for-unity\Plugins\Editor\External\x64\RealtimeCSG[1_559].dll"
+    [string]$PluginDll = ".\experiments\source-repos\realtime-CSG-for-unity\Plugins\Editor\External\x64\RealtimeCSG[1_559].dll",
+    [switch]$Health,
+    [switch]$DebugNative
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,7 +23,14 @@ if ($LASTEXITCODE -ne 0) {
     throw "RealtimeCSG native bridge build failed with exit code $LASTEXITCODE"
 }
 Copy-Item -LiteralPath $resolvedDll -Destination (Join-Path $releaseDir "RealtimeCSG[1_559].dll") -Force
-& (Join-Path $releaseDir "RealtimeCsgNativeBridge.exe") $resolvedOutput
+$bridgeArgs = @($resolvedOutput)
+if ($Health) {
+    $bridgeArgs += "--health"
+}
+if ($DebugNative) {
+    $bridgeArgs += "--debug-native"
+}
+& (Join-Path $releaseDir "RealtimeCsgNativeBridge.exe") @bridgeArgs
 if ($LASTEXITCODE -ne 0) {
     Remove-Item -LiteralPath $resolvedOutput -ErrorAction SilentlyContinue
     throw "RealtimeCSG native bridge failed with exit code $LASTEXITCODE"

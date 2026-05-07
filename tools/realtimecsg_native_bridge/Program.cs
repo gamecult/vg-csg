@@ -3,13 +3,23 @@ using System.Runtime.InteropServices;
 
 const int WarmupIterations = 8;
 const int MeasureIterations = 64;
+var debugNative = args.Any(arg => arg == "--debug-native");
+var healthOnly = args.Any(arg => arg == "--health");
 
-var output = args.Length > 0
-    ? args[0]
+var outputArg = args.FirstOrDefault(arg => arg != "--debug-native" && arg != "--health");
+var output = outputArg is not null
+    ? outputArg
     : Path.GetFullPath(Path.Combine("experiments", "generated", "realtimecsg-cpp-perf-latest.jsonl"));
 
 Directory.CreateDirectory(Path.GetDirectoryName(output)!);
 Native.RegisterNoopUnityMethods();
+if (healthOnly)
+{
+    using var healthWriter = new StreamWriter(output, false);
+    healthWriter.WriteLine(RunHealthProbe());
+    return;
+}
+
 var cases = new PerfCase[]
 {
     new("single_center_cut", 2, SingleCenterCut),
@@ -25,7 +35,7 @@ foreach (var perfCase in cases)
     writer.WriteLine(RunCase(perfCase));
 }
 
-static string RunCase(PerfCase perfCase)
+string RunCase(PerfCase perfCase)
 {
     var timings = new List<long>(MeasureIterations);
     var triangles = 0;
@@ -38,12 +48,17 @@ static string RunCase(PerfCase perfCase)
         throw new InvalidOperationException($"Failed to build native RealtimeCSG tree for {perfCase.Name}");
 
     Native.RebuildAll();
+    if (debugNative)
+        DumpTree(perfCase.Name, tree);
     if (Native.GetBrushCount() != perfCase.Brushes)
         throw new InvalidOperationException($"Native brush count mismatch for {perfCase.Name}: expected {perfCase.Brushes}, got {Native.GetBrushCount()}, nodes={Native.GetNodeCount()}, trees={Native.GetTreeCount()}, brushMeshes={Native.GetBrushMeshCount()}");
     for (var i = 0; i < WarmupIterations; i++)
         MeasureOnce(tree, out triangles, out vertices, out meshDescriptions);
     if (meshDescriptions == 0)
+    {
+        DumpTree(perfCase.Name, tree);
         throw new InvalidOperationException($"Native generated no mesh descriptions for {perfCase.Name}: nodes={Native.GetNodeCount()}, brushes={Native.GetBrushCount()}, trees={Native.GetTreeCount()}, brushMeshes={Native.GetBrushMeshCount()}, treeBrushes={Native.GetNumberOfBrushesInTree(tree)}, treeChildren={Native.GetChildNodeCount(tree)}, treeDirty={Native.IsNodeDirty(tree)}");
+    }
 
     for (var i = 0; i < MeasureIterations; i++)
     {
@@ -60,14 +75,76 @@ static string RunCase(PerfCase perfCase)
         $"{{\"kernel\":\"realtime_csg_cpp\",\"scenario\":\"{perfCase.Name}\",\"brushes\":{perfCase.Brushes},\"iterations\":{MeasureIterations},\"warmup_iterations\":{WarmupIterations},\"mean_ns\":{TicksToNs(mean)},\"min_ns\":{TicksToNs(timings[0])},\"p50_ns\":{TicksToNs(timings[(timings.Count - 1) * 50 / 100])},\"p95_ns\":{TicksToNs(timings[(timings.Count - 1) * 95 / 100])},\"max_ns\":{TicksToNs(timings[^1])},\"triangles\":{triangles},\"vertices\":{vertices},\"mesh_descriptions\":{meshDescriptions}}}";
 }
 
+static string RunHealthProbe()
+{
+    Native.ClearAllNodes();
+    var tree = TreeFrom(() => new[]
+    {
+        Brush("native_health_cube", Vec3.Zero, Vec3.Splat(4), Mat4.Identity, Operation.Additive),
+    });
+    Native.RebuildAll();
+    var updateOk = Native.UpdateAllTreeMeshes();
+    var child = Native.GetChildNodeAtIndex(tree, 0);
+    var bounds = new Aabb();
+    var boundsOk = Native.GetBrushBounds(child, ref bounds);
+    var outlineOk = Native.GetBrushOutlineSizes(child, out var outlineVertices, out var visibleOuter, out var visibleInner, out var invisibleOuter, out var invisibleInner, out var invalid);
+    var rayStart = new Vec3(-8, 0, 0);
+    var rayEnd = new Vec3(8, 0, 0);
+    var matrix = Mat4.Identity;
+    var rayHits = Native.RayCastIntoTreeMultiCount(tree, ref rayStart, ref rayEnd, ref matrix, 0, false, IntPtr.Zero, 0);
+    var meshTypes = MeshQuery.RenderOnlyTypes;
+    var meshTypesHandle = GCHandle.Alloc(meshTypes, GCHandleType.Pinned);
+    var generated = Native.GenerateMeshDescriptions(tree, meshTypes.Length, meshTypesHandle.AddrOfPinnedObject(), VertexChannelFlags.All, out var meshDescriptions);
+    meshTypesHandle.Free();
+    var heartbeat = updateOk && Native.GetTreeEnabled(tree) && Native.GetChildNodeCount(tree) == 1 && boundsOk && outlineOk && rayHits > 0;
+    var meshExtractionReady = generated && meshDescriptions > 0;
+    var json =
+        $"{{\"kernel\":\"realtime_csg_cpp\",\"scenario\":\"native_health_cube\",\"heartbeat\":{JsonBool(heartbeat)},\"mesh_extraction_ready\":{JsonBool(meshExtractionReady)},\"update_ok\":{JsonBool(updateOk)},\"tree\":{tree},\"tree_enabled\":{JsonBool(Native.GetTreeEnabled(tree))},\"nodes\":{Native.GetNodeCount()},\"brushes\":{Native.GetBrushCount()},\"trees\":{Native.GetTreeCount()},\"brush_meshes\":{Native.GetBrushMeshCount()},\"tree_children\":{Native.GetChildNodeCount(tree)},\"tree_brushes\":{Native.GetNumberOfBrushesInTree(tree)},\"tree_dirty\":{JsonBool(Native.IsNodeDirty(tree))},\"child_type\":{Native.GetTypeOfNode(child)},\"child_tree\":{Native.GetTreeOfNode(child)},\"child_mesh\":{Native.GetBrushMeshID(child)},\"child_operation\":{Native.GetBrushOperationType(child)},\"bounds_ok\":{JsonBool(boundsOk)},\"bounds_min\":[{bounds.MinX},{bounds.MinY},{bounds.MinZ}],\"bounds_max\":[{bounds.MaxX},{bounds.MaxY},{bounds.MaxZ}],\"outline_ok\":{JsonBool(outlineOk)},\"outline_vertices\":{outlineVertices},\"visible_outer_lines\":{visibleOuter},\"visible_inner_lines\":{visibleInner},\"invisible_outer_lines\":{invisibleOuter},\"invisible_inner_lines\":{invisibleInner},\"invalid_lines\":{invalid},\"raycast_hits\":{rayHits},\"mesh_descriptions_generated\":{JsonBool(generated)},\"mesh_descriptions\":{meshDescriptions}}}";
+    Native.ClearAllNodes();
+    return json;
+}
+
+static void DumpTree(string name, int tree)
+{
+    Native.RebuildAll();
+    var updated = Native.UpdateAllTreeMeshes();
+    Console.Error.WriteLine($"native debug {name}: updated={updated} tree={tree} type={Native.GetTypeOfNode(tree)} enabled={Native.GetTreeEnabled(tree)} children={Native.GetChildNodeCount(tree)} dirty={Native.IsNodeDirty(tree)} nodes={Native.GetNodeCount()} brushes={Native.GetBrushCount()} trees={Native.GetTreeCount()} brushMeshes={Native.GetBrushMeshCount()}");
+    for (var i = 0; i < Native.GetChildNodeCount(tree); i++)
+    {
+        var child = Native.GetChildNodeAtIndex(tree, i);
+        var bounds = new Aabb();
+        var boundsOk = Native.GetBrushBounds(child, ref bounds);
+        var outlineOk = Native.GetBrushOutlineSizes(child, out var outlineVertices, out var visibleOuter, out var visibleInner, out var invisibleOuter, out var invisibleInner, out var invalid);
+        Console.Error.WriteLine($"  child[{i}] id={child} type={Native.GetTypeOfNode(child)} tree={Native.GetTreeOfNode(child)} mesh={Native.GetBrushMeshID(child)} op={Native.GetBrushOperationType(child)} dirty={Native.IsNodeDirty(child)} boundsOk={boundsOk} bounds=({bounds.MinX},{bounds.MinY},{bounds.MinZ})..({bounds.MaxX},{bounds.MaxY},{bounds.MaxZ}) outlineOk={outlineOk} outlineVertices={outlineVertices} visibleOuter={visibleOuter} visibleInner={visibleInner} invisibleOuter={invisibleOuter} invisibleInner={invisibleInner} invalid={invalid}");
+    }
+    var rayStart = new Vec3(-8, 0, 0);
+    var rayEnd = new Vec3(8, 0, 0);
+    var matrix = Mat4.Identity;
+    var rayHits = Native.RayCastIntoTreeMultiCount(tree, ref rayStart, ref rayEnd, ref matrix, 0, false, IntPtr.Zero, 0);
+    Console.Error.WriteLine($"  raycast hits={rayHits}");
+    ProbeGeneratedMesh(tree);
+}
+
+static void ProbeGeneratedMesh(int tree)
+{
+    var indices = new int[8192];
+    var positions = new Vec3[8192];
+    var indexHandle = GCHandle.Alloc(indices, GCHandleType.Pinned);
+    var positionHandle = GCHandle.Alloc(positions, GCHandleType.Pinned);
+    var ok = Native.GetGeneratedMesh(tree, 0, 0, indices.Length, indexHandle.AddrOfPinnedObject(), positions.Length, positionHandle.AddrOfPinnedObject(), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out var center, out var size);
+    positionHandle.Free();
+    indexHandle.Free();
+    Console.Error.WriteLine($"  direct mesh probe ok={ok} boundsCenter=({center.X},{center.Y},{center.Z}) boundsSize=({size.X},{size.Y},{size.Z}) firstIndex={indices[0]} firstPos=({positions[0].X},{positions[0].Y},{positions[0].Z})");
+}
+
 static long TicksToNs(long ticks) => (long)(ticks * (1_000_000_000.0 / Stopwatch.Frequency));
+static string JsonBool(bool value) => value ? "true" : "false";
 
 static void MeasureOnce(int tree, out int triangles, out int vertices, out int meshDescriptions)
 {
-    Native.RebuildAll();
     Native.UpdateAllTreeMeshes();
 
-    var meshTypes = new[] { MeshQuery.RenderableAll };
+    var meshTypes = MeshQuery.RenderOnlyTypes;
     var meshTypesHandle = GCHandle.Alloc(meshTypes, GCHandleType.Pinned);
     var generated = Native.GenerateMeshDescriptions(tree, meshTypes.Length, meshTypesHandle.AddrOfPinnedObject(), VertexChannelFlags.All, out meshDescriptions);
     if (!generated || meshDescriptions == 0)
@@ -126,9 +203,11 @@ static void MeasureOnce(int tree, out int triangles, out int vertices, out int m
 
 static int SingleCenterCut()
 {
-    return Tree(
+    return TreeFrom(() => new[]
+    {
         Brush("source", Vec3.Zero, Vec3.Splat(4), Mat4.Identity, Operation.Additive),
-        Brush("void", Vec3.Zero, Vec3.Splat(2), Mat4.Identity, Operation.Subtractive));
+        Brush("void", Vec3.Zero, Vec3.Splat(2), Mat4.Identity, Operation.Subtractive),
+    });
 }
 
 static int RoomGrid8x8Doors()
@@ -185,11 +264,18 @@ static int DistantCutters512()
 
 static int Tree(params int[] children)
 {
+    return TreeFrom(() => children);
+}
+
+static int TreeFrom(Func<int[]> buildChildren)
+{
+    var children = buildChildren();
     if (!Native.GenerateTree(0, out var tree))
         return 0;
-    Native.SetTreeEnabled(tree, true);
-    if (!SetChildNodes(tree, children))
-        throw new InvalidOperationException($"SetChildNodes failed for tree {tree} with {children.Length} children");
+    if (!Native.SetTreeEnabled(tree, true) || !Native.GetTreeEnabled(tree))
+        throw new InvalidOperationException($"SetTreeEnabled failed for tree {tree}");
+    if (!InsertChildNodes(tree, children))
+        throw new InvalidOperationException($"InsertChildNodes failed for tree {tree} with {children.Length} children");
     foreach (var child in children)
         Native.SetDirty(child);
     Native.SetDirty(tree);
@@ -202,8 +288,6 @@ static int Brush(string name, Vec3 center, Vec3 size, Mat4 rotation, Operation o
     var meshId = CreateBrushMesh(mesh, name.GetHashCode());
     if (meshId == 0 || !Native.GenerateBrush(name.GetHashCode(), out var brush))
         throw new InvalidOperationException($"Failed to create brush {name}: meshId={meshId}");
-    if (!UpdateBrushMesh(meshId, mesh))
-        throw new InvalidOperationException($"UpdateBrushMesh failed for brush {name}: meshId={meshId}");
     if (!Native.IsBrushMeshIDValid(meshId))
         throw new InvalidOperationException($"Native rejected brush mesh {name}/{meshId}");
     var transform = rotation.WithTranslation(center);
@@ -211,7 +295,7 @@ static int Brush(string name, Vec3 center, Vec3 size, Mat4 rotation, Operation o
         throw new InvalidOperationException($"SetNodeLocalTransformation failed for brush {name}/{brush}");
     if (!Native.SetBrushMeshID(brush, meshId))
         throw new InvalidOperationException($"SetBrushMeshID failed for brush {name}/{brush}, mesh={meshId}");
-    if (!Native.SetBrushOperationType(brush, operation))
+    if (operation != Operation.Additive && !Native.SetBrushOperationType(brush, operation))
         throw new InvalidOperationException($"SetBrushOperationType failed for brush {name}/{brush}, op={operation}");
     if (Native.GetBrushMeshID(brush) != meshId)
         throw new InvalidOperationException($"Brush {name}/{brush} did not retain mesh id {meshId}");
@@ -219,11 +303,10 @@ static int Brush(string name, Vec3 center, Vec3 size, Mat4 rotation, Operation o
     return brush;
 }
 
-static bool SetChildNodes(int node, int[] children)
+static bool InsertChildNodes(int node, int[] children)
 {
-    var childNodes = children.Select(id => new CsgTreeNode(id)).ToArray();
-    var handle = GCHandle.Alloc(childNodes, GCHandleType.Pinned);
-    var ok = Native.SetChildNodes(node, childNodes.Length, handle.AddrOfPinnedObject());
+    var handle = GCHandle.Alloc(children, GCHandleType.Pinned);
+    var ok = Native.InsertChildNodeRange(node, 0, children.Length, handle.AddrOfPinnedObject());
     handle.Free();
     return ok;
 }
@@ -240,23 +323,11 @@ static int CreateBrushMesh(BrushMesh mesh, int userId)
     return id;
 }
 
-static bool UpdateBrushMesh(int meshId, BrushMesh mesh)
-{
-    var vh = GCHandle.Alloc(mesh.Vertices, GCHandleType.Pinned);
-    var eh = GCHandle.Alloc(mesh.HalfEdges, GCHandleType.Pinned);
-    var ph = GCHandle.Alloc(mesh.Polygons, GCHandleType.Pinned);
-    var ok = Native.UpdateBrushMesh(meshId, mesh.Vertices.Length, vh.AddrOfPinnedObject(), mesh.HalfEdges.Length, eh.AddrOfPinnedObject(), mesh.Polygons.Length, ph.AddrOfPinnedObject());
-    ph.Free();
-    eh.Free();
-    vh.Free();
-    return ok;
-}
-
 static BrushMesh Cube(Vec3 size)
 {
     var min = size * -0.5f;
     var max = size * 0.5f;
-    var layers = new SurfaceLayers { LayerUsage = LayerUsageFlags.RenderReceiveCastShadows };
+    var layers = new SurfaceLayers { LayerUsage = LayerUsageFlags.RenderReceiveCastShadows | LayerUsageFlags.Collidable };
     var surfaces = new[]
     {
         new SurfaceDescription { UV0 = new UvMatrix(new Vec4(-1, 0,  0, -min.X), new Vec4(0, 1,  0,  min.Y)) },
@@ -295,6 +366,7 @@ record PerfCase(string Name, int Brushes, Func<int> Build);
 record BrushMesh(Vec3[] Vertices, HalfEdge[] HalfEdges, Polygon[] Polygons);
 
 enum Operation : byte { Additive = 0, Subtractive = 1, Intersecting = 2 }
+enum BrushFlags : int { Default = 0, Infinite = 1 }
 enum VertexChannelFlags : byte { Position = 0, Tangent = 2, Normal = 4, UV0 = 8, All = 14 }
 enum LayerUsageFlags : int
 {
@@ -371,6 +443,14 @@ struct SurfaceLayers
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct Aabb
+{
+    public float MinX, MaxX;
+    public float MinY, MaxY;
+    public float MinZ, MaxZ;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct Polygon(int firstEdge, int edgeCount, int polygonId, SurfaceDescription surface, SurfaceLayers layers)
 {
     public int FirstEdge = firstEdge;
@@ -388,16 +468,35 @@ struct HalfEdge(int vertexIndex, int twinIndex)
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-struct CsgTreeNode(int nodeId) { public int NodeId = nodeId; }
-
-[StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct MeshQuery
 {
     const int BitShift = 24;
     public uint Layers;
     public uint MaskAndChannels;
     public static MeshQuery RenderableAll => new(LayerUsageFlags.Renderable, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All);
-    MeshQuery(LayerUsageFlags query, LayerUsageFlags mask, LayerParameterIndex parameterIndex, VertexChannelFlags vertexChannels)
+    public static MeshQuery[] SimpleTypes => new[]
+    {
+        new MeshQuery(LayerUsageFlags.Renderable, LayerUsageFlags.Renderable, LayerParameterIndex.None, VertexChannelFlags.Position),
+        new MeshQuery(LayerUsageFlags.RenderReceiveCastShadows, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.None, VertexChannelFlags.Position),
+        new MeshQuery(LayerUsageFlags.Renderable, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.None, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.RenderReceiveCastShadows, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.None, LayerUsageFlags.None, LayerParameterIndex.None, VertexChannelFlags.Position),
+        new MeshQuery(LayerUsageFlags.Culled, LayerUsageFlags.Culled, LayerParameterIndex.None, VertexChannelFlags.Position),
+    };
+    public static MeshQuery[] RenderOnlyTypes => new[]
+    {
+        new MeshQuery(LayerUsageFlags.CastShadows, LayerUsageFlags.RenderCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.Renderable, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.RenderCastShadows, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.RenderReceiveShadows, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.RenderReceiveCastShadows, LayerUsageFlags.RenderReceiveCastShadows, LayerParameterIndex.LayerParameter1, VertexChannelFlags.All),
+        new MeshQuery(LayerUsageFlags.None, LayerUsageFlags.Renderable, LayerParameterIndex.None, VertexChannelFlags.Position),
+        new MeshQuery(LayerUsageFlags.CastShadows, LayerUsageFlags.None, LayerParameterIndex.None, VertexChannelFlags.Position),
+        new MeshQuery(LayerUsageFlags.ReceiveShadows, LayerUsageFlags.None, LayerParameterIndex.None, VertexChannelFlags.Position),
+        new MeshQuery(LayerUsageFlags.Culled, LayerUsageFlags.None, LayerParameterIndex.None, VertexChannelFlags.Position),
+    };
+
+    public MeshQuery(LayerUsageFlags query, LayerUsageFlags mask, LayerParameterIndex parameterIndex, VertexChannelFlags vertexChannels)
     {
         if (mask == LayerUsageFlags.None)
             mask = query;
@@ -463,21 +562,32 @@ static partial class Native
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GenerateTree(int userID, out int generatedTreeNodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int GetNumberOfBrushesInTree(int nodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetDirty(int nodeID);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool ClearDirty(int nodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool IsNodeDirty(int nodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int GetChildNodeCount(int nodeID);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int GetChildNodeAtIndex(int nodeID, int index);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int GetTreeOfNode(int nodeID);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern byte GetTypeOfNode(int nodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetTreeEnabled(int modelNodeID, bool isEnabled);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GetTreeEnabled(int modelNodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GenerateBrush(int userID, out int generatedNodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GenerateBranch(int userID, out int generatedOperationNodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetBranchOperationType(int branchNodeID, Operation operation);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetBrushOperationType(int brushNodeID, Operation operation);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetBrushFlags(int brushNodeID, BrushFlags flags);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int GetBrushOperationType(int brushNodeID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetBrushMeshID(int brushNodeID, int brushMeshID);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int GetBrushMeshID(int brushNodeID);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GetBrushBounds(int brushNodeID, ref Aabb bounds);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GetBrushOutlineSizes(int brushNodeID, out int vertexCount, out int visibleOuterLineCount, out int visibleInnerLineCount, out int invisibleOuterLineCount, out int invisibleInnerLineCount, out int invalidLineCount);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetNodeLocalTransformation(int brushNodeID, ref Mat4 brushToTreeSpace);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool SetChildNodes(int nodeID, int childCount, IntPtr childrenNodeIDs);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool InsertChildNodeRange(int nodeID, int index, int childCount, IntPtr childrenNodeIDs);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int CreateBrushMesh(int userID, int vertexCount, IntPtr vertices, int halfEdgeCount, IntPtr halfEdges, int polygonCount, IntPtr polygons);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool UpdateBrushMesh(int brushMeshIndex, int vertexCount, IntPtr vertices, int halfEdgeCount, IntPtr halfEdges, int polygonCount, IntPtr polygons);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool IsBrushMeshIDValid(int brushMeshIndex);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GenerateMeshDescriptions(int treeNodeID, int meshTypeCount, IntPtr meshTypes, VertexChannelFlags vertexChannelMask, out int meshDescriptionCount);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GetMeshDescriptions(int treeNodeID, int meshDescriptionCount, IntPtr meshDescriptions);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern bool GetGeneratedMesh(int treeNodeID, int meshIndex, int subMeshIndex, int indexCount, IntPtr indices, int vertexCount, IntPtr positions, IntPtr tangents, IntPtr normals, IntPtr uvs, out Vec3 boundsCenter, out Vec3 boundsSize);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern int RayCastIntoTreeMultiCount(int modelNodeID, ref Vec3 worldRayStart, ref Vec3 worldRayEnd, ref Mat4 modelLocalToWorldMatrix, int inFilterLayerParameter0, bool ignoreInvisiblePolygons, IntPtr ignoreNodeIds, int ignoreNodeIdCount);
 }

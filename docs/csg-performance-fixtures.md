@@ -51,6 +51,12 @@ surface mirrored by its managed Unity library:
 .\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp
 ```
 
+To test the native bridge without running the full timing suite:
+
+```powershell
+.\tools\run_realtimecsg_cpp_perf.ps1 -OutputPath .\experiments\generated\realtimecsg-cpp-health-latest.jsonl -Health
+```
+
 That path builds `tools/realtimecsg_native_bridge`, copies
 `RealtimeCSG[1_559].dll` beside the bridge executable, calls only exported
 functions already declared by the plugin's managed P/Invoke layer, and writes
@@ -58,13 +64,12 @@ native timing records to `experiments/generated/realtimecsg-cpp-perf-latest.json
 It fails closed if the native plugin emits no mesh descriptions; zero-geometry
 timings are poison, not data.
 
-Current direct-DLL status: the bridge successfully loads the native plugin and
-creates brush meshes, brushes, and trees through the mirrored P/Invoke surface,
-but outside the Unity-hosted plugin lifecycle the native query currently returns
-success with `meshDescriptionCount = 0` even for a single additive cube. The
-failure is useful: it proves the exported heart can be reached directly, and it
-also proves we still need the missing initialization or lifecycle surface before
-using the C++ plugin as a timing oracle.
+Current direct-DLL status: the bridge successfully loads the native plugin,
+creates brush meshes, brushes, and trees, verifies bounds, outlines, raycasts,
+and now extracts generated mesh descriptions. The fragile part was construction
+discipline: build child nodes before the tree, insert them through the public
+Foundation range-insert path, and avoid eagerly setting default brush operation
+or flag state.
 
 The reference executable must emit JSONL with the same scenario names. Until
 that harness exists, the script appends a `kernel=reference,status=missing`
@@ -74,20 +79,25 @@ The public `LogicalError/Realtime-CSG-demo` source still exposes the relevant
 algorithmic surface: half-edge control meshes, polygon bounds, visible flags,
 inside/outside/aligned/reverse-aligned categories, crossing polygon splits, and
 logical routing tables. Use it as readable doctrine. Use the native bridge as
-the performance target once the missing initialization path is identified.
+the performance target.
 
 ## Latest Local Baseline
 
-Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1`:
+Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
 
 ```jsonl
-{"kernel":"vg_csg","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":37314,"min_ns":27300,"p50_ns":32400,"p95_ns":45600,"max_ns":203900,"triangles":72,"fragments":6,"warnings":0}
-{"kernel":"vg_csg","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":8413054,"min_ns":4710000,"p50_ns":8020100,"p95_ns":11060600,"max_ns":18551700,"triangles":3072,"fragments":256,"warnings":0}
-{"kernel":"vg_csg","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":14952303,"min_ns":8627100,"p50_ns":14678000,"p95_ns":19088600,"max_ns":28753400,"triangles":3404,"fragments":280,"warnings":0}
-{"kernel":"vg_csg","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":891484,"min_ns":616700,"p50_ns":823700,"p95_ns":1312000,"max_ns":3726400,"triangles":45,"fragments":1,"warnings":0}
-{"kernel":"vg_csg","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":552914,"min_ns":459100,"p50_ns":471500,"p95_ns":775900,"max_ns":1421600,"triangles":12,"fragments":1,"warnings":0}
-{"status":"missing","reason":"Set VIBEGEOMETRY_REFERENCE_CSG_PERF or pass -ReferenceCommand with an executable that emits the same JSONL scenario records.","kernel":"reference"}
+{"kernel":"vg_csg","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":30817,"min_ns":21200,"p50_ns":25300,"p95_ns":41600,"max_ns":144900,"triangles":72,"fragments":6,"warnings":0}
+{"kernel":"vg_csg","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":6558703,"min_ns":4415500,"p50_ns":6232300,"p95_ns":8580100,"max_ns":10348300,"triangles":3072,"fragments":256,"warnings":0}
+{"kernel":"vg_csg","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":12701656,"min_ns":9057100,"p50_ns":12045700,"p95_ns":17285200,"max_ns":29792900,"triangles":3404,"fragments":280,"warnings":0}
+{"kernel":"vg_csg","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":890965,"min_ns":617100,"p50_ns":871800,"p95_ns":1214900,"max_ns":1989700,"triangles":45,"fragments":1,"warnings":0}
+{"kernel":"vg_csg","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":635082,"min_ns":460900,"p50_ns":578300,"p95_ns":873800,"max_ns":1361200,"triangles":12,"fragments":1,"warnings":0}
+{"kernel":"realtime_csg_cpp","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":8300,"min_ns":5500,"p50_ns":7300,"p95_ns":11700,"max_ns":22000,"triangles":72,"vertices":144,"mesh_descriptions":3}
+{"kernel":"realtime_csg_cpp","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":530000,"min_ns":379700,"p50_ns":446300,"p95_ns":915500,"max_ns":1537100,"triangles":12800,"vertices":20992,"mesh_descriptions":4}
+{"kernel":"realtime_csg_cpp","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":112800,"min_ns":93600,"p50_ns":99900,"p95_ns":143600,"max_ns":314200,"triangles":3498,"vertices":5102,"mesh_descriptions":4}
+{"kernel":"realtime_csg_cpp","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":76800,"min_ns":57200,"p50_ns":64400,"p95_ns":104900,"max_ns":428700,"triangles":1536,"vertices":2412,"mesh_descriptions":4}
+{"kernel":"realtime_csg_cpp","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":324600,"min_ns":240400,"p50_ns":263400,"p95_ns":534100,"max_ns":1530400,"triangles":6180,"vertices":12360,"mesh_descriptions":4}
 ```
 
-Read these as smoke timings, not final benchmark gospel. The fixtures are stable
-enough to catch regressions and compare against a reference harness once wired.
+Read these as smoke timings, not final benchmark gospel. They are already sharp
+enough to show the target: our current ordered Rust backend is not yet competing
+with the C++ classifier/router on mesh-heavy workloads.
