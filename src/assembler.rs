@@ -253,7 +253,7 @@ impl Assembler {
             return output.clone();
         }
 
-        let output = self.build_uncached();
+        let output = self.build_with_checkpoints();
         *self.cache.borrow_mut() = Some(output.clone());
         *self.first_dirty_index.borrow_mut() = None;
         output
@@ -418,10 +418,15 @@ impl Assembler {
             .iter()
             .all(|brush| matches!(brush.geometry, CompiledGeometry::Box(_)))
         {
-            return self.build_axis_aligned_boxes();
+            return self.build_axis_aligned_boxes_direct();
         }
 
         self.build_general_direct()
+    }
+
+    fn build_with_checkpoints(&self) -> BuildOutput {
+        self.try_build_axis_aligned_boxes_from_cache(Some(0))
+            .unwrap_or_else(|| self.build_general_from_cache(Some(0)))
     }
 
     fn build_general_direct(&self) -> BuildOutput {
@@ -432,9 +437,12 @@ impl Assembler {
         state.into_output(self.brushes.len(), self.generation)
     }
 
-    fn build_axis_aligned_boxes(&self) -> BuildOutput {
-        self.try_build_axis_aligned_boxes_from_cache(Some(0))
-            .expect("box-only build path received a non-box brush")
+    fn build_axis_aligned_boxes_direct(&self) -> BuildOutput {
+        let mut state = BoxBuildState::default();
+        for brush in &self.compiled {
+            state.apply_compiled_box(brush);
+        }
+        state.into_output_with_mesh(self.brushes.len(), self.generation, None)
     }
 
     fn try_build_axis_aligned_boxes_from_cache(
@@ -451,6 +459,11 @@ impl Assembler {
 
         let brush_count = self.compiled.len();
         let previous_output = self.cache.borrow().as_ref().cloned();
+        if let Some(first_dirty_index) = first_dirty_index
+            && first_dirty_index > 0
+        {
+            return Some(self.build_axis_aligned_boxes_direct());
+        }
         let rebuild_from = match first_dirty_index {
             Some(index) => index.min(brush_count),
             None => self
@@ -1352,16 +1365,20 @@ mod tests {
             Aabb::from_center_size(Vec3::ZERO, Vec3::splat(8.0)),
             MaterialId(1),
         );
-        let far = asm.cut_box(
+        let far = asm.cut_oriented_box(
             "far",
-            Aabb::from_center_size(Vec3::splat(100.0), Vec3::splat(1.0)),
+            Vec3::splat(100.0),
+            Vec3::splat(1.0),
+            bevy_math::Quat::from_rotation_z(0.2),
         );
         let before = asm.build_incremental();
 
         assert!(asm.set_brush_primitive(
             far,
-            Primitive::Box {
-                bounds: Aabb::from_center_size(Vec3::splat(120.0), Vec3::splat(1.0)),
+            Primitive::OrientedBox {
+                center: Vec3::splat(120.0),
+                size: Vec3::splat(1.0),
+                rotation: bevy_math::Quat::from_rotation_z(0.2),
             },
         ));
         let after = asm.build_incremental();

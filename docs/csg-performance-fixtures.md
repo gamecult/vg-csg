@@ -136,6 +136,13 @@ is intentionally exact and conservative: distant rejected edits can skip mesh
 emission, while candidate cuts still emit the full output mesh. The report
 exposes `reused_mesh` so the fixture and tests do not infer reuse from timing.
 
+Benchmark correction: `rebuild()` must bypass checkpoint caches. An earlier
+fixture pass accidentally let the dirty box baseline travel through cached box
+state, which made incremental box edits look better than they were. The live
+policy is stricter: box dirty edits use the direct builder unless a future real
+mesh patcher proves otherwise; general convex dirty edits keep the valid-prefix
+checkpoint path.
+
 ## Latest Local Baseline
 
 Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
@@ -202,3 +209,11 @@ previous mesh when no geometry was touched. The single-cut case is still
 slightly slower because cache machinery dominates. The next hard target is
 dirty mesh range patching for candidate edits; replaying less CSG work is not
 enough when every real cut still serializes the whole result mesh.
+
+Corrected lesson after separating `build()` from `rebuild()`: box candidate
+edits are currently better served by the direct box builder, not checkpoint
+replay. The checkpoint path still wins hard for general convex tail edits:
+`rotated_cut_stack_64` remains an order-of-magnitude style win in smoke runs,
+and `common_box_chain_64` stays far below full dirty rebuild. Rejected general
+convex suffixes can expose `reused_mesh:true`; the fixture includes
+`distant_oriented_cutters_128` for that case.

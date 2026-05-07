@@ -36,6 +36,11 @@ fn main() {
             brushes: 513,
             build: distant_cutters_512,
         },
+        PerfCase {
+            name: "distant_oriented_cutters_128",
+            brushes: 129,
+            build: distant_oriented_cutters_128,
+        },
     ];
 
     for case in cases {
@@ -326,6 +331,28 @@ fn distant_cutters_512() -> Assembler {
                 Vec3::new(1000.0 + col as f32 * 4.0, 1000.0 + row as f32 * 4.0, 0.0),
                 Vec3::splat(1.0),
             ),
+        );
+    }
+
+    asm
+}
+
+fn distant_oriented_cutters_128() -> Assembler {
+    let mut asm = Assembler::new();
+    asm.solid_box(
+        "source",
+        Aabb::from_center_size(Vec3::ZERO, Vec3::splat(8.0)),
+        MaterialId(1),
+    );
+
+    for index in 0..128 {
+        let row = index / 16;
+        let col = index % 16;
+        asm.cut_oriented_box(
+            format!("far_oriented_void_{index}"),
+            Vec3::new(1000.0 + col as f32 * 4.0, 1000.0 + row as f32 * 4.0, 0.0),
+            Vec3::splat(1.0),
+            Quat::from_rotation_z(index as f32 * 0.037),
         );
     }
 
