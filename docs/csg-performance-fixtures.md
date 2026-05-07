@@ -19,9 +19,17 @@ The script builds `vg_csg` in release mode and writes JSONL to
 - emitted triangle, fragment, and warning counts
 - demand-frontier `candidate_pairs` and `rejected_pairs`
 
-The `vg_csg` fixture measures the stable-tree path after warmup. `Assembler`
-caches evaluated output by generation, so repeated `build()` calls on an
-unchanged graph return the cached mesh. Dirty generations still rebuild.
+The `vg_csg` fixture measures:
+
+- `stable`: cached output after warmup
+- `dirty`: full rebuild through the current ordered assembler
+- `routed`: experimental surface-router rebuild, falling back to the ordered
+  assembler outside its current single-source, single-candidate subtractive
+  convex contract. The fixture only emits routed records for supported cases.
+
+`Assembler` caches evaluated output by generation, so repeated `build()` calls
+on an unchanged graph return the cached mesh. Dirty and routed generations
+still rebuild.
 
 ## Scenarios
 
@@ -90,6 +98,17 @@ the performance target.
 new kernel path; they expose the ordered brush stream as affected source/operator
 pairs and rejected bounds pairs so future router/index work can prove it is
 refusing real work rather than merely rearranging it.
+
+The first routed surface experiment is intentionally narrow. It cleans a single
+subtractive convex cut into boundary polygons instead of closed fragment boxes,
+but dense repeated cutters currently create surface-piece explosion. Keep dense
+rotated subtraction on the ordered kernel until the category router has compact
+frontier batching and scratch storage.
+
+Current routed lesson: for `single_center_cut`, routed output emits 48 boundary
+triangles instead of the fragment carver's 72 closed-fragment triangles. That is
+cleaner surface output, not yet faster output. The implementation still moves
+owned polygon vectors around, so it is a topology proof before it is a hot path.
 
 ## Latest Local Baseline
 

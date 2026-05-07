@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use bevy_math::Vec3;
 
 use crate::{
-    Aabb, Brush, BrushId, BrushOp, ConvexSolid, MaterialId, Primitive, TriangleMesh,
+    Aabb, Brush, BrushId, BrushOp, ConvexPolygon, ConvexSolid, MaterialId, Primitive, TriangleMesh,
     append_cylinder_z, append_dome_cap_z, append_floret_arm,
     primitives::{DomeCapZSpec, FloretArmSpec},
 };
@@ -181,6 +181,111 @@ impl Assembler {
 
     pub fn rebuild(&self) -> BuildOutput {
         self.build_uncached()
+    }
+
+    pub fn rebuild_routed_surfaces(&self) -> BuildOutput {
+        self.try_build_routed_surfaces()
+            .unwrap_or_else(|| self.build_uncached())
+    }
+
+    pub fn supports_routed_surfaces(&self) -> bool {
+        self.supports_routed_surface_subset()
+    }
+
+    fn try_build_routed_surfaces(&self) -> Option<BuildOutput> {
+        if !self.supports_routed_surface_subset() {
+            return None;
+        }
+
+        let mut report = BuildReport {
+            input_brushes: self.brushes.len(),
+            ..BuildReport::default()
+        };
+        let mut source = None::<ConvexSolid>;
+        let mut surfaces = Vec::<ConvexPolygon>::new();
+        let mut previous_cutters = Vec::<ConvexSolid>::new();
+
+        for brush in &self.compiled {
+            match brush.op {
+                BrushOp::Add => {
+                    if source.is_some() {
+                        return None;
+                    }
+                    let solid = brush.convex_cutter()?;
+                    surfaces = solid.polygons.clone();
+                    source = Some(solid);
+                }
+                BrushOp::Subtract => {
+                    report.operator_brushes += 1;
+                    let source_solid = source.as_ref()?;
+                    if !source_solid.bounds.intersects(brush.bounds) {
+                        report.rejected_pairs += 1;
+                        continue;
+                    }
+                    let cutter = brush.convex_cutter()?;
+                    report.candidate_pairs += 1;
+                    surfaces = ConvexSolid::route_polygons_outside_of(surfaces, &cutter);
+
+                    let mut caps = ConvexSolid::route_polygons_inside_of(
+                        cutter.polygons.clone(),
+                        source_solid,
+                    );
+                    for previous in &previous_cutters {
+                        caps = ConvexSolid::route_polygons_outside_of(caps, previous);
+                    }
+                    for cap in &mut caps {
+                        cap.material = source_solid.material;
+                        cap.reversed = !cap.reversed;
+                    }
+                    surfaces.extend(caps);
+                    previous_cutters.push(cutter);
+                }
+                BrushOp::Intersect => return None,
+            }
+        }
+
+        let mut mesh = TriangleMesh::new();
+        ConvexSolid::append_polygons_to_mesh(&surfaces, &mut mesh);
+        report.emitted_convex_fragments = surfaces.len();
+
+        Some(BuildOutput {
+            mesh,
+            report,
+            generation: self.generation,
+        })
+    }
+
+    fn supports_routed_surface_subset(&self) -> bool {
+        let mut source = None::<Aabb>;
+        let mut candidate_subtracts = 0usize;
+
+        for brush in &self.compiled {
+            match brush.op {
+                BrushOp::Add => {
+                    if source.is_some() || brush.convex_cutter().is_none() {
+                        return false;
+                    }
+                    source = Some(brush.bounds);
+                }
+                BrushOp::Subtract => {
+                    let Some(source_bounds) = source else {
+                        return false;
+                    };
+                    if brush.convex_cutter().is_none() {
+                        return false;
+                    }
+                    if source_bounds.intersects(brush.bounds) {
+                        candidate_subtracts += 1;
+                        if candidate_subtracts > 1 {
+                            return false;
+                        }
+                    }
+                }
+                BrushOp::Intersect => return false,
+            }
+        }
+
+        source.is_some() && candidate_subtracts == 1
     }
 
     fn build_uncached(&self) -> BuildOutput {
@@ -690,5 +795,119 @@ mod tests {
         assert_eq!(stable.mesh.indices, dirty.mesh.indices);
         assert_eq!(cached.mesh.positions, stable.mesh.positions);
         assert_eq!(cached.mesh.indices, stable.mesh.indices);
+    }
+
+    #[test]
+    fn routed_surface_rebuild_emits_clean_center_cut_boundary() {
+        let mut asm = Assembler::new();
+        let cutter = Aabb::from_center_size(Vec3::ZERO, Vec3::splat(2.0));
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        asm.cut_box("void", cutter);
+
+        let routed = asm.rebuild_routed_surfaces();
+
+        assert_eq!(routed.report.operator_brushes, 1);
+        assert_eq!(routed.report.candidate_pairs, 1);
+        assert_eq!(routed.report.rejected_pairs, 0);
+        assert_eq!(routed.report.emitted_convex_fragments, 24);
+        assert!(routed.mesh.triangle_count() < asm.rebuild().mesh.triangle_count());
+        for tri in routed.mesh.indices.chunks_exact(3) {
+            let center = (routed.mesh.positions[tri[0] as usize]
+                + routed.mesh.positions[tri[1] as usize]
+                + routed.mesh.positions[tri[2] as usize])
+                / 3.0;
+            assert!(!cutter.contains_point_strict(center, 1.0e-4));
+        }
+    }
+
+    #[test]
+    fn routed_surface_rebuild_falls_back_for_intersections() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        asm.add_brush(
+            "common",
+            BrushOp::Intersect,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::X, Vec3::splat(4.0)),
+            },
+            MaterialId(1),
+        );
+
+        let stable = asm.rebuild();
+        let routed = asm.rebuild_routed_surfaces();
+
+        assert_eq!(
+            routed.report.emitted_convex_fragments,
+            stable.report.emitted_convex_fragments
+        );
+        assert_eq!(routed.mesh.triangle_count(), stable.mesh.triangle_count());
+        assert_eq!(routed.mesh.positions, stable.mesh.positions);
+        assert_eq!(routed.mesh.indices, stable.mesh.indices);
+    }
+
+    #[test]
+    fn routed_surface_rebuild_falls_back_for_multiple_candidate_cutters() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        asm.cut_oriented_box(
+            "a",
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(1.0, 5.0, 5.0),
+            bevy_math::Quat::from_rotation_z(0.25),
+        );
+        asm.cut_oriented_box(
+            "b",
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(1.0, 5.0, 5.0),
+            bevy_math::Quat::from_rotation_z(-0.25),
+        );
+
+        let stable = asm.rebuild();
+        let routed = asm.rebuild_routed_surfaces();
+
+        assert_eq!(
+            routed.report.emitted_convex_fragments,
+            stable.report.emitted_convex_fragments
+        );
+        assert_eq!(routed.mesh.triangle_count(), stable.mesh.triangle_count());
+        assert_eq!(routed.mesh.positions, stable.mesh.positions);
+        assert_eq!(routed.mesh.indices, stable.mesh.indices);
+    }
+
+    #[test]
+    fn routed_surface_rebuild_falls_back_when_no_cutter_touches_source() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        asm.cut_box(
+            "far",
+            Aabb::from_center_size(Vec3::splat(20.0), Vec3::splat(2.0)),
+        );
+
+        let stable = asm.rebuild();
+        let routed = asm.rebuild_routed_surfaces();
+
+        assert_eq!(
+            routed.report.emitted_convex_fragments,
+            stable.report.emitted_convex_fragments
+        );
+        assert_eq!(routed.mesh.triangle_count(), stable.mesh.triangle_count());
+        assert_eq!(routed.mesh.positions, stable.mesh.positions);
+        assert_eq!(routed.mesh.indices, stable.mesh.indices);
     }
 }

@@ -256,39 +256,75 @@ impl ConvexSolid {
     }
 
     pub fn categorize_polygons_against(&self, cutter: &Self) -> CategorizedPolygons {
-        let mut categorized = CategorizedPolygons::default();
+        categorize_polygon_list_against(&self.polygons, cutter)
+    }
 
-        for polygon in &self.polygons {
-            let mut pieces = vec![CategorizationPiece {
-                polygon: polygon.clone(),
-                aligned_category: None,
-            }];
+    pub fn route_polygons_outside_of(
+        polygons: Vec<ConvexPolygon>,
+        cutter: &Self,
+    ) -> Vec<ConvexPolygon> {
+        let categorized = categorize_polygon_list_against(&polygons, cutter);
+        categorized.outside
+    }
 
-            for plane in &cutter.clip_planes {
-                let mut inside_pieces = Vec::new();
-                for piece in pieces {
-                    classify_piece_against_plane(
-                        piece,
-                        *plane,
-                        &mut inside_pieces,
-                        &mut categorized,
-                    );
-                }
-                pieces = inside_pieces;
-            }
+    pub fn route_polygons_inside_of(
+        polygons: Vec<ConvexPolygon>,
+        cutter: &Self,
+    ) -> Vec<ConvexPolygon> {
+        let categorized = categorize_polygon_list_against(&polygons, cutter);
+        let mut inside = categorized.inside;
+        inside.extend(categorized.aligned);
+        inside.extend(categorized.reverse_aligned);
+        inside
+    }
 
-            for piece in pieces {
-                match piece.aligned_category {
-                    Some(PolygonCategory::Aligned) => categorized.aligned.push(piece.polygon),
-                    Some(PolygonCategory::ReverseAligned) => {
-                        categorized.reverse_aligned.push(piece.polygon);
-                    }
-                    _ => categorized.inside.push(piece.polygon),
-                }
-            }
+    pub fn subtract_convex_routed_polygons(&self, cutter: &Self) -> Vec<ConvexPolygon> {
+        let mut polygons = Vec::new();
+        let source = self.categorize_polygons_against(cutter);
+        polygons.extend(source.outside);
+
+        let cutter_inside_source = cutter.categorize_polygons_against(self);
+        for mut polygon in cutter_inside_source.inside {
+            polygon.reversed = !polygon.reversed;
+            polygons.push(polygon);
+        }
+        for mut polygon in cutter_inside_source.aligned {
+            polygon.reversed = !polygon.reversed;
+            polygons.push(polygon);
+        }
+        for mut polygon in cutter_inside_source.reverse_aligned {
+            polygon.reversed = !polygon.reversed;
+            polygons.push(polygon);
         }
 
-        categorized
+        polygons
+    }
+
+    pub fn append_polygons_to_mesh(polygons: &[ConvexPolygon], mesh: &mut TriangleMesh) {
+        for polygon in polygons {
+            if !polygon.visible || polygon.vertices.len() < 3 {
+                continue;
+            }
+            let base = polygon.vertices[0];
+            for i in 1..polygon.vertices.len() - 1 {
+                let triangle = if polygon.reversed {
+                    [base, polygon.vertices[i + 1], polygon.vertices[i]]
+                } else {
+                    [base, polygon.vertices[i], polygon.vertices[i + 1]]
+                };
+                let normal = if polygon.reversed {
+                    -polygon.normal
+                } else {
+                    polygon.normal
+                };
+                mesh.append_triangle(
+                    triangle,
+                    normal,
+                    [Vec2::ZERO, Vec2::X, Vec2::Y],
+                    polygon.material,
+                );
+            }
+        }
     }
 
     fn split_owned(self, plane: Plane) -> SplitResult {
@@ -346,6 +382,40 @@ impl ConvexSolid {
             },
         }
     }
+}
+
+fn categorize_polygon_list_against(
+    polygons: &[ConvexPolygon],
+    cutter: &ConvexSolid,
+) -> CategorizedPolygons {
+    let mut categorized = CategorizedPolygons::default();
+
+    for polygon in polygons {
+        let mut pieces = vec![CategorizationPiece {
+            polygon: polygon.clone(),
+            aligned_category: None,
+        }];
+
+        for plane in &cutter.clip_planes {
+            let mut inside_pieces = Vec::new();
+            for piece in pieces {
+                classify_piece_against_plane(piece, *plane, &mut inside_pieces, &mut categorized);
+            }
+            pieces = inside_pieces;
+        }
+
+        for piece in pieces {
+            match piece.aligned_category {
+                Some(PolygonCategory::Aligned) => categorized.aligned.push(piece.polygon),
+                Some(PolygonCategory::ReverseAligned) => {
+                    categorized.reverse_aligned.push(piece.polygon);
+                }
+                _ => categorized.inside.push(piece.polygon),
+            }
+        }
+    }
+
+    categorized
 }
 
 enum SplitResult {
@@ -730,5 +800,77 @@ mod tests {
                 .iter()
                 .any(|polygon| polygon.normal.x.abs() > 0.01 && polygon.normal.y.abs() > 0.01)
         }));
+    }
+
+    #[test]
+    fn routed_subtraction_emits_source_shell_and_reversed_cutter_shell() {
+        let source = ConvexSolid::box_from_center_size(
+            Vec3::ZERO,
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            MaterialId(1),
+        );
+        let cutter = ConvexSolid::box_from_center_size(
+            Vec3::ZERO,
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            MaterialId(0),
+        );
+
+        let routed = source.subtract_convex_routed_polygons(&cutter);
+
+        assert_eq!(routed.len(), 24);
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|polygon| polygon.material == MaterialId(1))
+                .count(),
+            18
+        );
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|polygon| polygon.material == MaterialId(0))
+                .count(),
+            6
+        );
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|polygon| polygon.material == MaterialId(0) && polygon.reversed)
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn routed_subtraction_clips_crossing_cutter_surfaces_to_source() {
+        let source = ConvexSolid::box_from_center_size(
+            Vec3::ZERO,
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            MaterialId(1),
+        );
+        let cutter = ConvexSolid::box_from_center_size(
+            Vec3::new(1.5, 0.0, 0.0),
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            MaterialId(0),
+        );
+
+        let routed = source.subtract_convex_routed_polygons(&cutter);
+
+        assert!(!routed.is_empty());
+        assert!(
+            routed
+                .iter()
+                .flat_map(|polygon| polygon.vertices.iter())
+                .all(|vertex| source.bounds.contains_point(*vertex))
+        );
+        assert!(
+            routed
+                .iter()
+                .any(|polygon| polygon.material == MaterialId(0) && polygon.reversed)
+        );
     }
 }

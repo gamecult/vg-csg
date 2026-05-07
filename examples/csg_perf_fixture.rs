@@ -41,6 +41,7 @@ fn main() {
     for case in cases {
         run_case(case, PerfMode::Stable);
         run_case(case, PerfMode::Dirty);
+        run_case(case, PerfMode::Routed);
     }
 }
 
@@ -55,6 +56,7 @@ struct PerfCase {
 enum PerfMode {
     Stable,
     Dirty,
+    Routed,
 }
 
 impl PerfMode {
@@ -62,6 +64,7 @@ impl PerfMode {
         match self {
             Self::Stable => "stable",
             Self::Dirty => "dirty",
+            Self::Routed => "routed",
         }
     }
 
@@ -69,12 +72,16 @@ impl PerfMode {
         match self {
             Self::Stable => assembler.build(),
             Self::Dirty => assembler.rebuild(),
+            Self::Routed => assembler.rebuild_routed_surfaces(),
         }
     }
 }
 
 fn run_case(case: PerfCase, mode: PerfMode) {
     let assembler = (case.build)();
+    if matches!(mode, PerfMode::Routed) && !assembler.supports_routed_surfaces() {
+        return;
+    }
     let warmup = mode.build(&assembler);
     black_box(warmup.mesh.triangle_count());
 
