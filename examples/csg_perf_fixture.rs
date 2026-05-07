@@ -41,6 +41,7 @@ fn main() {
     for case in cases {
         run_case(case, PerfMode::Stable);
         run_case(case, PerfMode::Dirty);
+        run_case(case, PerfMode::IncrementalDirty);
         run_case(case, PerfMode::Routed);
     }
 }
@@ -56,6 +57,7 @@ struct PerfCase {
 enum PerfMode {
     Stable,
     Dirty,
+    IncrementalDirty,
     Routed,
 }
 
@@ -64,29 +66,37 @@ impl PerfMode {
         match self {
             Self::Stable => "stable",
             Self::Dirty => "dirty",
+            Self::IncrementalDirty => "incremental_dirty",
             Self::Routed => "routed",
         }
     }
 
-    fn build(self, assembler: &Assembler) -> vg_csg::BuildOutput {
+    fn build(self, assembler: &mut Assembler, iteration: usize) -> vg_csg::BuildOutput {
         match self {
             Self::Stable => assembler.build(),
-            Self::Dirty => assembler.rebuild(),
+            Self::Dirty => {
+                nudge_tail_brush(assembler, iteration);
+                assembler.rebuild()
+            }
+            Self::IncrementalDirty => {
+                nudge_tail_brush(assembler, iteration);
+                assembler.build_incremental()
+            }
             Self::Routed => assembler.rebuild_routed_surfaces(),
         }
     }
 }
 
 fn run_case(case: PerfCase, mode: PerfMode) {
-    let assembler = (case.build)();
+    let mut assembler = (case.build)();
     if matches!(mode, PerfMode::Routed) && !assembler.supports_routed_surfaces() {
         return;
     }
-    let warmup = mode.build(&assembler);
+    let warmup = assembler.build();
     black_box(warmup.mesh.triangle_count());
 
     for _ in 0..WARMUP_ITERS {
-        let output = mode.build(&assembler);
+        let output = mode.build(&mut assembler, 0);
         black_box(output.mesh.triangle_count());
     }
 
@@ -97,9 +107,9 @@ fn run_case(case: PerfCase, mode: PerfMode) {
     let mut candidate_pairs = 0;
     let mut rejected_pairs = 0;
 
-    for _ in 0..MEASURE_ITERS {
+    for iteration in 0..MEASURE_ITERS {
         let start = Instant::now();
-        let output = mode.build(&assembler);
+        let output = mode.build(&mut assembler, iteration);
         let elapsed = start.elapsed();
         triangles = output.mesh.triangle_count();
         fragments = output.report.emitted_convex_fragments;
@@ -144,6 +154,44 @@ fn run_case(case: PerfCase, mode: PerfMode) {
         candidate_pairs,
         rejected_pairs
     );
+}
+
+fn nudge_tail_brush(assembler: &mut Assembler, iteration: usize) {
+    let Some(brush) = assembler.brushes().last().cloned() else {
+        return;
+    };
+    let phase = if iteration.is_multiple_of(2) {
+        0.0
+    } else {
+        0.01
+    };
+    match brush.primitive {
+        Primitive::Box { bounds } => {
+            let center = bounds.center();
+            let size = bounds.size() + Vec3::splat(phase);
+            assembler.set_brush_primitive(
+                brush.id,
+                Primitive::Box {
+                    bounds: Aabb::from_center_size(center, size),
+                },
+            );
+        }
+        Primitive::OrientedBox {
+            center,
+            size,
+            rotation,
+        } => {
+            assembler.set_brush_primitive(
+                brush.id,
+                Primitive::OrientedBox {
+                    center,
+                    size: size + Vec3::splat(phase),
+                    rotation,
+                },
+            );
+        }
+        _ => {}
+    }
 }
 
 fn percentile_ns(values: &[Duration], percentile: usize) -> u128 {

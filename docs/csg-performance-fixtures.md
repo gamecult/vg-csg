@@ -119,8 +119,16 @@ Realtime editing seam: `Assembler` can now mutate brush primitives and
 operations by `BrushId`, invalidating cached output and incrementing generation.
 `DirtyDemandFrontier` computes the conservative ordered suffix after the first
 dirty brush. The prefix before that index is the cacheable region; the suffix is
-the live region because ordered CSG decisions propagate forward. This is still a
-planning surface, not an incremental mesh rebuild yet.
+the live region because ordered CSG decisions propagate forward. The first
+implementation now uses that boundary only for box-only prefix checkpoints; the
+convex/router path still needs the same treatment.
+
+Incremental edit seam: box-only ordered CSG now stores prefix checkpoints after
+each brush. A tail edit can resume from the checkpoint immediately before the
+dirty brush and replay only the live suffix. The result is parity-checked
+against a full rebuild. This is a real cache boundary, but final mesh emission is
+still whole-output, so the current win appears in larger tail-edit cases rather
+than tiny scenes.
 
 ## Latest Local Baseline
 
@@ -154,3 +162,30 @@ dirty paths are respectable, distant bounds rejection is excellent, and dense
 rotated subtraction is still the open wound. The category-router kernel remains
 the next architectural move; cached output is a guardrail, not a replacement
 for the real engine.
+
+## Incremental Box-Only Smoke Run
+
+Captured on 2026-05-07 with
+`cargo run -p vg_csg --release --example csg_perf_fixture`. Dirty modes mutate
+the tail brush each iteration. `incremental_dirty` uses the box-prefix
+checkpoint cache when the scene is box-only and falls back for non-box/rotated
+cases.
+
+```jsonl
+{"kernel":"vg_csg","mode":"stable","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":518,"min_ns":500,"p50_ns":500,"p95_ns":600,"max_ns":700,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"dirty","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":4287,"min_ns":3800,"p50_ns":4000,"p95_ns":4700,"max_ns":14000,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":4617,"min_ns":4100,"p50_ns":4200,"p95_ns":6600,"max_ns":10600,"triangles":72,"fragments":6,"warnings":0,"candidate_pairs":1,"rejected_pairs":0}
+{"kernel":"vg_csg","mode":"stable","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":46415,"min_ns":41500,"p50_ns":42200,"p95_ns":52400,"max_ns":195100,"triangles":3072,"fragments":256,"warnings":0,"candidate_pairs":64,"rejected_pairs":8128}
+{"kernel":"vg_csg","mode":"dirty","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":825753,"min_ns":464400,"p50_ns":715400,"p95_ns":1257500,"max_ns":3452200,"triangles":3108,"fragments":259,"warnings":0,"candidate_pairs":65,"rejected_pairs":8127}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":516351,"min_ns":112000,"p50_ns":363900,"p95_ns":983900,"max_ns":4876400,"triangles":3108,"fragments":259,"warnings":0,"candidate_pairs":65,"rejected_pairs":8127}
+{"kernel":"vg_csg","mode":"stable","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":240,"min_ns":200,"p50_ns":200,"p95_ns":300,"max_ns":500,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
+{"kernel":"vg_csg","mode":"dirty","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":52087,"min_ns":35900,"p50_ns":44800,"p95_ns":56700,"max_ns":281000,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
+{"kernel":"vg_csg","mode":"incremental_dirty","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":35528,"min_ns":32200,"p50_ns":32500,"p95_ns":47000,"max_ns":50000,"triangles":12,"fragments":1,"warnings":0,"candidate_pairs":0,"rejected_pairs":512}
+```
+
+Tail-edit lesson: prefix caching cuts the big box-room dirty mean by roughly a
+third and distant-cutter dirty mean by roughly a third. The single-cut case is
+slower because cache machinery dominates, and rotated/non-box cases still use
+the full path. The next hard target is cached mesh emission or dirty output
+patching; replaying less CSG work is not enough if every edit still serializes
+the whole result mesh.

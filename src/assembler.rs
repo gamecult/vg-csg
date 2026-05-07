@@ -37,6 +37,8 @@ pub struct Assembler {
     brushes: Vec<Brush>,
     compiled: Vec<CompiledBrush>,
     cache: RefCell<Option<BuildOutput>>,
+    box_cache: RefCell<Option<BoxBuildCache>>,
+    first_dirty_index: RefCell<Option<usize>>,
     next_id: u32,
     generation: u64,
 }
@@ -76,6 +78,18 @@ enum CompiledGeometry {
         thickness: f32,
         tip_lift: f32,
     },
+}
+
+#[derive(Clone, Debug, Default)]
+struct BoxBuildCache {
+    generation: u64,
+    checkpoints: Vec<BoxBuildState>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BoxBuildState {
+    boxes: Vec<(Aabb, MaterialId)>,
+    report: BuildReport,
 }
 
 impl Assembler {
@@ -122,11 +136,13 @@ impl Assembler {
     ) -> BrushId {
         let id = BrushId(self.next_id);
         self.next_id += 1;
+        let index = self.brushes.len();
         let brush = Brush::new(id, name, op, primitive, material);
         self.compiled.push(CompiledBrush::from_brush(&brush));
         self.brushes.push(brush);
         self.generation = self.generation.wrapping_add(1);
         self.cache.borrow_mut().take();
+        self.mark_dirty_index(index);
         id
     }
 
@@ -139,6 +155,7 @@ impl Assembler {
         self.compiled[index] = CompiledBrush::from_brush(&self.brushes[index]);
         self.generation = self.generation.wrapping_add(1);
         self.cache.borrow_mut().take();
+        self.mark_dirty_index(index);
         true
     }
 
@@ -151,6 +168,7 @@ impl Assembler {
         self.compiled[index] = CompiledBrush::from_brush(&self.brushes[index]);
         self.generation = self.generation.wrapping_add(1);
         self.cache.borrow_mut().take();
+        self.mark_dirty_index(index);
         true
     }
 
@@ -223,7 +241,49 @@ impl Assembler {
 
         let output = self.build_uncached();
         *self.cache.borrow_mut() = Some(output.clone());
+        *self.first_dirty_index.borrow_mut() = None;
         output
+    }
+
+    pub fn build_incremental(&self) -> BuildOutput {
+        if let Some(output) = self
+            .cache
+            .borrow()
+            .as_ref()
+            .filter(|output| output.generation == self.generation)
+        {
+            return output.clone();
+        }
+
+        let first_dirty_index = *self.first_dirty_index.borrow();
+        let output = self
+            .try_build_axis_aligned_boxes_from_cache(first_dirty_index)
+            .unwrap_or_else(|| self.build_uncached());
+        *self.cache.borrow_mut() = Some(output.clone());
+        *self.first_dirty_index.borrow_mut() = None;
+        output
+    }
+
+    pub fn rebuild_incremental_for_indices(
+        &self,
+        dirty_indices: impl IntoIterator<Item = usize>,
+    ) -> BuildOutput {
+        let first_dirty_index = self
+            .dirty_frontier_for_indices(dirty_indices)
+            .first_dirty_index;
+        self.try_build_axis_aligned_boxes_from_cache(first_dirty_index)
+            .unwrap_or_else(|| self.build_uncached())
+    }
+
+    pub fn rebuild_incremental_for_brushes(
+        &self,
+        dirty_brushes: impl IntoIterator<Item = BrushId>,
+    ) -> BuildOutput {
+        let indices = dirty_brushes
+            .into_iter()
+            .filter_map(|id| self.brush_index(id))
+            .collect::<Vec<_>>();
+        self.rebuild_incremental_for_indices(indices)
     }
 
     pub fn rebuild(&self) -> BuildOutput {
@@ -237,6 +297,11 @@ impl Assembler {
 
     pub fn supports_routed_surfaces(&self) -> bool {
         self.supports_routed_surface_subset()
+    }
+
+    fn mark_dirty_index(&self, index: usize) {
+        let mut first_dirty_index = self.first_dirty_index.borrow_mut();
+        *first_dirty_index = Some(first_dirty_index.map_or(index, |dirty| dirty.min(index)));
     }
 
     fn try_build_routed_surfaces(&self) -> Option<BuildOutput> {
@@ -470,75 +535,72 @@ impl Assembler {
     }
 
     fn build_axis_aligned_boxes(&self) -> BuildOutput {
-        let mut report = BuildReport {
-            input_brushes: self.brushes.len(),
-            ..BuildReport::default()
+        self.try_build_axis_aligned_boxes_from_cache(Some(0))
+            .expect("box-only build path received a non-box brush")
+    }
+
+    fn try_build_axis_aligned_boxes_from_cache(
+        &self,
+        first_dirty_index: Option<usize>,
+    ) -> Option<BuildOutput> {
+        if !self
+            .compiled
+            .iter()
+            .all(|brush| matches!(brush.geometry, CompiledGeometry::Box(_)))
+        {
+            return None;
+        }
+
+        let brush_count = self.compiled.len();
+        let rebuild_from = match first_dirty_index {
+            Some(index) => index.min(brush_count),
+            None => self
+                .box_cache
+                .borrow()
+                .as_ref()
+                .filter(|cache| {
+                    cache.generation == self.generation
+                        && cache.checkpoints.len() == brush_count + 1
+                })
+                .map_or(0, |_| brush_count),
         };
-        let mut boxes: Vec<(Aabb, MaterialId)> = Vec::new();
+        let cached_state = self
+            .box_cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.checkpoints.get(rebuild_from).cloned());
+        let (mut state, start_index) = if let Some(state) = cached_state {
+            (state, rebuild_from)
+        } else {
+            (BoxBuildState::default(), 0)
+        };
 
-        for brush in &self.compiled {
-            let CompiledGeometry::Box(bounds) = brush.geometry else {
-                unreachable!("box-only build path received a non-box brush");
-            };
-            match brush.op {
-                BrushOp::Add => boxes.push((bounds, brush.material)),
-                BrushOp::Subtract => {
-                    report.operator_brushes += 1;
-                    if !bounds.intersects_any(boxes.iter().map(|(bounds, _)| *bounds)) {
-                        report.rejected_pairs += boxes.len();
-                        continue;
-                    }
-                    let mut out = Vec::with_capacity(boxes.len() + 4);
-                    for (solid, material) in boxes {
-                        if solid.intersects(bounds) {
-                            report.candidate_pairs += 1;
-                            out.extend(
-                                solid
-                                    .subtract_box(bounds)
-                                    .into_iter()
-                                    .map(|piece| (piece, material)),
-                            );
-                        } else {
-                            report.rejected_pairs += 1;
-                            out.push((solid, material));
-                        }
-                    }
-                    boxes = out;
-                }
-                BrushOp::Intersect => {
-                    report.operator_brushes += 1;
-                    if !bounds.intersects_any(boxes.iter().map(|(bounds, _)| *bounds)) {
-                        report.rejected_pairs += boxes.len();
-                        boxes.clear();
-                        continue;
-                    }
-                    boxes = boxes
-                        .into_iter()
-                        .filter_map(|(solid, material)| {
-                            if let Some(hit) = solid.intersection(bounds) {
-                                report.candidate_pairs += 1;
-                                Some((hit, material))
-                            } else {
-                                report.rejected_pairs += 1;
-                                None
-                            }
-                        })
-                        .collect();
-                }
-            }
+        let mut checkpoints = self
+            .box_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .checkpoints
+                    .iter()
+                    .take(start_index + 1)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|checkpoints| checkpoints.len() == start_index + 1)
+            .unwrap_or_else(|| vec![BoxBuildState::default()]);
+
+        for brush in &self.compiled[start_index..] {
+            state.apply_compiled_box(brush);
+            checkpoints.push(state.clone());
         }
 
-        let mut mesh = TriangleMesh::new();
-        report.emitted_convex_fragments = boxes.len();
-        for (bounds, material) in boxes {
-            mesh.append_box(bounds, material);
-        }
-
-        BuildOutput {
-            mesh,
-            report,
+        *self.box_cache.borrow_mut() = Some(BoxBuildCache {
             generation: self.generation,
-        }
+            checkpoints,
+        });
+
+        Some(state.into_output(self.brushes.len(), self.generation))
     }
 
     pub fn sample_room_with_door() -> Self {
@@ -635,6 +697,79 @@ impl CompiledBrush {
             CompiledGeometry::Box(bounds) => Some(ConvexSolid::from_aabb(*bounds, self.material)),
             CompiledGeometry::Convex(solid) => Some(solid.clone()),
             _ => None,
+        }
+    }
+}
+
+impl BoxBuildState {
+    fn apply_compiled_box(&mut self, brush: &CompiledBrush) {
+        let CompiledGeometry::Box(bounds) = brush.geometry else {
+            unreachable!("box build state received a non-box brush");
+        };
+
+        match brush.op {
+            BrushOp::Add => self.boxes.push((bounds, brush.material)),
+            BrushOp::Subtract => {
+                self.report.operator_brushes += 1;
+                if !bounds.intersects_any(self.boxes.iter().map(|(bounds, _)| *bounds)) {
+                    self.report.rejected_pairs += self.boxes.len();
+                    return;
+                }
+
+                let mut out = Vec::with_capacity(self.boxes.len() + 4);
+                for (solid, material) in self.boxes.drain(..) {
+                    if solid.intersects(bounds) {
+                        self.report.candidate_pairs += 1;
+                        out.extend(
+                            solid
+                                .subtract_box(bounds)
+                                .into_iter()
+                                .map(|piece| (piece, material)),
+                        );
+                    } else {
+                        self.report.rejected_pairs += 1;
+                        out.push((solid, material));
+                    }
+                }
+                self.boxes = out;
+            }
+            BrushOp::Intersect => {
+                self.report.operator_brushes += 1;
+                if !bounds.intersects_any(self.boxes.iter().map(|(bounds, _)| *bounds)) {
+                    self.report.rejected_pairs += self.boxes.len();
+                    self.boxes.clear();
+                    return;
+                }
+
+                self.boxes = self
+                    .boxes
+                    .drain(..)
+                    .filter_map(|(solid, material)| {
+                        if let Some(hit) = solid.intersection(bounds) {
+                            self.report.candidate_pairs += 1;
+                            Some((hit, material))
+                        } else {
+                            self.report.rejected_pairs += 1;
+                            None
+                        }
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    fn into_output(mut self, input_brushes: usize, generation: u64) -> BuildOutput {
+        let mut mesh = TriangleMesh::new();
+        self.report.input_brushes = input_brushes;
+        self.report.emitted_convex_fragments = self.boxes.len();
+        for (bounds, material) in self.boxes {
+            mesh.append_box(bounds, material);
+        }
+
+        BuildOutput {
+            mesh,
+            report: self.report,
+            generation,
         }
     }
 }
@@ -984,6 +1119,94 @@ mod tests {
         assert_ne!(after.mesh.positions, before.mesh.positions);
         assert_eq!(asm.brush_index(source), Some(0));
         assert_eq!(asm.brush_index(cutter), Some(1));
+    }
+
+    #[test]
+    fn incremental_box_rebuild_reuses_prefix_and_matches_full_rebuild() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(8.0)),
+            MaterialId(1),
+        );
+        asm.cut_box(
+            "early",
+            Aabb::from_center_size(Vec3::new(-2.0, 0.0, 0.0), Vec3::splat(2.0)),
+        );
+        let dirty = asm.cut_box(
+            "dirty",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(2.0)),
+        );
+        asm.cut_box(
+            "late",
+            Aabb::from_center_size(Vec3::new(2.0, 0.0, 0.0), Vec3::splat(2.0)),
+        );
+        let before = asm.build();
+
+        assert!(asm.set_brush_primitive(
+            dirty,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::ZERO, Vec3::splat(3.0)),
+            },
+        ));
+        let incremental = asm.build_incremental();
+        let full = asm.rebuild();
+
+        assert_eq!(incremental.mesh.positions, full.mesh.positions);
+        assert_eq!(incremental.mesh.indices, full.mesh.indices);
+        assert_eq!(
+            incremental.report.candidate_pairs,
+            full.report.candidate_pairs
+        );
+        assert_eq!(
+            incremental.report.rejected_pairs,
+            full.report.rejected_pairs
+        );
+        assert_eq!(incremental.generation, full.generation);
+        assert_ne!(incremental.mesh.positions, before.mesh.positions);
+    }
+
+    #[test]
+    fn explicit_incremental_box_rebuild_matches_full_rebuild() {
+        let mut asm = Assembler::new();
+        asm.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(8.0)),
+            MaterialId(1),
+        );
+        asm.cut_box(
+            "early",
+            Aabb::from_center_size(Vec3::new(-2.0, 0.0, 0.0), Vec3::splat(2.0)),
+        );
+        let dirty = asm.cut_box(
+            "dirty",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(2.0)),
+        );
+        asm.cut_box(
+            "late",
+            Aabb::from_center_size(Vec3::new(2.0, 0.0, 0.0), Vec3::splat(2.0)),
+        );
+        asm.build();
+
+        assert!(asm.set_brush_primitive(
+            dirty,
+            Primitive::Box {
+                bounds: Aabb::from_center_size(Vec3::ZERO, Vec3::splat(3.0)),
+            },
+        ));
+        let incremental = asm.rebuild_incremental_for_brushes([dirty]);
+        let full = asm.rebuild();
+
+        assert_eq!(incremental.mesh.positions, full.mesh.positions);
+        assert_eq!(incremental.mesh.indices, full.mesh.indices);
+        assert_eq!(
+            incremental.report.candidate_pairs,
+            full.report.candidate_pairs
+        );
+        assert_eq!(
+            incremental.report.rejected_pairs,
+            full.report.rejected_pairs
+        );
     }
 
     #[test]
