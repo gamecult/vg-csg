@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use bevy_math::Vec3;
 
 use crate::{
@@ -29,8 +31,47 @@ pub struct BuildOutput {
 #[derive(Clone, Debug, Default)]
 pub struct Assembler {
     brushes: Vec<Brush>,
+    compiled: Vec<CompiledBrush>,
+    cache: RefCell<Option<BuildOutput>>,
     next_id: u32,
     generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledBrush {
+    op: BrushOp,
+    material: MaterialId,
+    bounds: Aabb,
+    geometry: CompiledGeometry,
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+enum CompiledGeometry {
+    Box(Aabb),
+    Convex(ConvexSolid),
+    CylinderZ {
+        center: Vec3,
+        radius: f32,
+        depth: f32,
+        segments: usize,
+    },
+    DomeCapZ {
+        center: Vec3,
+        radius: f32,
+        height: f32,
+        rings: usize,
+        segments: usize,
+    },
+    FloretArm {
+        anchor: Vec3,
+        direction: Vec3,
+        length: f32,
+        root_width: f32,
+        tip_width: f32,
+        thickness: f32,
+        tip_lift: f32,
+    },
 }
 
 impl Assembler {
@@ -55,9 +96,11 @@ impl Assembler {
     ) -> BrushId {
         let id = BrushId(self.next_id);
         self.next_id += 1;
-        self.brushes
-            .push(Brush::new(id, name, op, primitive, material));
+        let brush = Brush::new(id, name, op, primitive, material);
+        self.compiled.push(CompiledBrush::from_brush(&brush));
+        self.brushes.push(brush);
         self.generation = self.generation.wrapping_add(1);
+        self.cache.borrow_mut().take();
         id
     }
 
@@ -119,6 +162,29 @@ impl Assembler {
     }
 
     pub fn build(&self) -> BuildOutput {
+        if let Some(output) = self
+            .cache
+            .borrow()
+            .as_ref()
+            .filter(|output| output.generation == self.generation)
+        {
+            return output.clone();
+        }
+
+        let output = self.build_uncached();
+        *self.cache.borrow_mut() = Some(output.clone());
+        output
+    }
+
+    fn build_uncached(&self) -> BuildOutput {
+        if self
+            .compiled
+            .iter()
+            .all(|brush| matches!(brush.geometry, CompiledGeometry::Box(_)))
+        {
+            return self.build_axis_aligned_boxes();
+        }
+
         let mut report = BuildReport {
             input_brushes: self.brushes.len(),
             ..BuildReport::default()
@@ -126,25 +192,14 @@ impl Assembler {
         let mut mesh = TriangleMesh::new();
         let mut solids: Vec<ConvexSolid> = Vec::new();
 
-        for brush in &self.brushes {
+        for brush in &self.compiled {
             match brush.op {
-                BrushOp::Add => match &brush.primitive {
-                    Primitive::Box { bounds } => {
+                BrushOp::Add => match &brush.geometry {
+                    CompiledGeometry::Box(bounds) => {
                         solids.push(ConvexSolid::from_aabb(*bounds, brush.material));
                     }
-                    Primitive::OrientedBox {
-                        center,
-                        size,
-                        rotation,
-                    } => {
-                        solids.push(ConvexSolid::box_from_center_size(
-                            *center,
-                            *size,
-                            *rotation,
-                            brush.material,
-                        ));
-                    }
-                    Primitive::CylinderZ {
+                    CompiledGeometry::Convex(solid) => solids.push(solid.clone()),
+                    CompiledGeometry::CylinderZ {
                         center,
                         radius,
                         depth,
@@ -157,7 +212,7 @@ impl Assembler {
                         *segments,
                         brush.material,
                     ),
-                    Primitive::DomeCapZ {
+                    CompiledGeometry::DomeCapZ {
                         center,
                         radius,
                         height,
@@ -174,7 +229,7 @@ impl Assembler {
                             material: brush.material,
                         },
                     ),
-                    Primitive::FloretArm {
+                    CompiledGeometry::FloretArm {
                         anchor,
                         direction,
                         length,
@@ -197,8 +252,14 @@ impl Assembler {
                     ),
                 },
                 BrushOp::Subtract => {
-                    if let Some(cutter) = convex_cutter_for_brush(brush) {
-                        solids = subtract_from_solids(&solids, &cutter);
+                    if !brush
+                        .bounds
+                        .intersects_any(solids.iter().map(|solid| solid.bounds))
+                    {
+                        continue;
+                    }
+                    if let Some(cutter) = brush.convex_cutter() {
+                        solids = subtract_from_solids(solids, &cutter);
                     } else {
                         report
                             .warnings
@@ -208,8 +269,15 @@ impl Assembler {
                     }
                 }
                 BrushOp::Intersect => {
-                    if let Some(cutter) = convex_cutter_for_brush(brush) {
-                        solids = intersect_solids(&solids, &cutter);
+                    if !brush
+                        .bounds
+                        .intersects_any(solids.iter().map(|solid| solid.bounds))
+                    {
+                        solids.clear();
+                        continue;
+                    }
+                    if let Some(cutter) = brush.convex_cutter() {
+                        solids = intersect_solids(solids, &cutter);
                     } else {
                         report
                             .warnings
@@ -224,6 +292,66 @@ impl Assembler {
         report.emitted_convex_fragments = solids.len();
         for solid in solids {
             solid.append_to_mesh(&mut mesh);
+        }
+
+        BuildOutput {
+            mesh,
+            report,
+            generation: self.generation,
+        }
+    }
+
+    fn build_axis_aligned_boxes(&self) -> BuildOutput {
+        let mut report = BuildReport {
+            input_brushes: self.brushes.len(),
+            ..BuildReport::default()
+        };
+        let mut boxes: Vec<(Aabb, MaterialId)> = Vec::new();
+
+        for brush in &self.compiled {
+            let CompiledGeometry::Box(bounds) = brush.geometry else {
+                unreachable!("box-only build path received a non-box brush");
+            };
+            match brush.op {
+                BrushOp::Add => boxes.push((bounds, brush.material)),
+                BrushOp::Subtract => {
+                    if !bounds.intersects_any(boxes.iter().map(|(bounds, _)| *bounds)) {
+                        continue;
+                    }
+                    let mut out = Vec::with_capacity(boxes.len() + 4);
+                    for (solid, material) in boxes {
+                        if solid.intersects(bounds) {
+                            out.extend(
+                                solid
+                                    .subtract_box(bounds)
+                                    .into_iter()
+                                    .map(|piece| (piece, material)),
+                            );
+                        } else {
+                            out.push((solid, material));
+                        }
+                    }
+                    boxes = out;
+                }
+                BrushOp::Intersect => {
+                    if !bounds.intersects_any(boxes.iter().map(|(bounds, _)| *bounds)) {
+                        boxes.clear();
+                        continue;
+                    }
+                    boxes = boxes
+                        .into_iter()
+                        .filter_map(|(solid, material)| {
+                            solid.intersection(bounds).map(|hit| (hit, material))
+                        })
+                        .collect();
+                }
+            }
+        }
+
+        let mut mesh = TriangleMesh::new();
+        report.emitted_convex_fragments = boxes.len();
+        for (bounds, material) in boxes {
+            mesh.append_box(bounds, material);
         }
 
         BuildOutput {
@@ -255,40 +383,99 @@ impl Assembler {
     }
 }
 
-fn convex_cutter_for_brush(brush: &Brush) -> Option<ConvexSolid> {
-    match &brush.primitive {
-        Primitive::Box { bounds } => Some(ConvexSolid::from_aabb(*bounds, brush.material)),
-        Primitive::OrientedBox {
-            center,
-            size,
-            rotation,
-        } => Some(ConvexSolid::box_from_center_size(
-            *center,
-            *size,
-            *rotation,
-            brush.material,
-        )),
-        _ => None,
+impl CompiledBrush {
+    fn from_brush(brush: &Brush) -> Self {
+        let bounds = brush.bounds();
+        let geometry = match &brush.primitive {
+            Primitive::Box { bounds } => CompiledGeometry::Box(*bounds),
+            Primitive::OrientedBox {
+                center,
+                size,
+                rotation,
+            } => CompiledGeometry::Convex(ConvexSolid::box_from_center_size(
+                *center,
+                *size,
+                *rotation,
+                brush.material,
+            )),
+            Primitive::CylinderZ {
+                center,
+                radius,
+                depth,
+                segments,
+            } => CompiledGeometry::CylinderZ {
+                center: *center,
+                radius: *radius,
+                depth: *depth,
+                segments: *segments,
+            },
+            Primitive::DomeCapZ {
+                center,
+                radius,
+                height,
+                rings,
+                segments,
+            } => CompiledGeometry::DomeCapZ {
+                center: *center,
+                radius: *radius,
+                height: *height,
+                rings: *rings,
+                segments: *segments,
+            },
+            Primitive::FloretArm {
+                anchor,
+                direction,
+                length,
+                root_width,
+                tip_width,
+                thickness,
+                tip_lift,
+            } => CompiledGeometry::FloretArm {
+                anchor: *anchor,
+                direction: *direction,
+                length: *length,
+                root_width: *root_width,
+                tip_width: *tip_width,
+                thickness: *thickness,
+                tip_lift: *tip_lift,
+            },
+        };
+
+        Self {
+            op: brush.op,
+            material: brush.material,
+            bounds,
+            geometry,
+            name: brush.name.clone(),
+        }
+    }
+
+    fn convex_cutter(&self) -> Option<ConvexSolid> {
+        match &self.geometry {
+            CompiledGeometry::Box(bounds) => Some(ConvexSolid::from_aabb(*bounds, self.material)),
+            CompiledGeometry::Convex(solid) => Some(solid.clone()),
+            _ => None,
+        }
     }
 }
 
-fn subtract_from_solids(solids: &[ConvexSolid], cutter: &ConvexSolid) -> Vec<ConvexSolid> {
+fn subtract_from_solids(solids: Vec<ConvexSolid>, cutter: &ConvexSolid) -> Vec<ConvexSolid> {
     let mut out = Vec::with_capacity(solids.len() + 4);
     for solid in solids {
         if solid.bounds.intersects(cutter.bounds) {
-            out.extend(solid.subtract_convex(cutter));
+            out.extend(solid.subtract_convex_owned(cutter));
         } else {
-            out.push(solid.clone());
+            out.push(solid);
         }
     }
     out
 }
 
-fn intersect_solids(solids: &[ConvexSolid], cutter: &ConvexSolid) -> Vec<ConvexSolid> {
+fn intersect_solids(solids: Vec<ConvexSolid>, cutter: &ConvexSolid) -> Vec<ConvexSolid> {
     let mut out = Vec::with_capacity(solids.len());
     for solid in solids {
         if solid.bounds.intersects(cutter.bounds)
-            && let Some(fragment) = solid.intersect_convex(cutter)
+            && let Some(fragment) = solid.intersect_convex_owned(cutter)
         {
             out.push(fragment);
         }

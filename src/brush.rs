@@ -98,6 +98,10 @@ impl Aabb {
             && self.max.z > other.min.z
     }
 
+    pub fn intersects_any(self, others: impl IntoIterator<Item = Self>) -> bool {
+        others.into_iter().any(|other| self.intersects(other))
+    }
+
     pub fn intersection(self, other: Self) -> Option<Self> {
         if !self.intersects(other) {
             return None;

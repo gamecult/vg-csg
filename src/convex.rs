@@ -139,15 +139,19 @@ impl ConvexSolid {
     }
 
     pub fn subtract_convex(&self, cutter: &Self) -> Vec<Self> {
+        self.clone().subtract_convex_owned(cutter)
+    }
+
+    pub fn subtract_convex_owned(self, cutter: &Self) -> Vec<Self> {
         let mut fragments = Vec::new();
-        let mut remainder = Some(self.clone());
+        let mut remainder = Some(self);
 
         for plane in &cutter.clip_planes {
             let Some(current) = remainder.take() else {
                 break;
             };
 
-            match current.split(*plane) {
+            match current.split_owned(*plane) {
                 SplitResult::Front(front) => {
                     fragments.push(front);
                     break;
@@ -169,10 +173,14 @@ impl ConvexSolid {
     }
 
     pub fn intersect_convex(&self, cutter: &Self) -> Option<Self> {
-        let mut remainder = self.clone();
+        self.clone().intersect_convex_owned(cutter)
+    }
+
+    pub fn intersect_convex_owned(self, cutter: &Self) -> Option<Self> {
+        let mut remainder = self;
 
         for plane in &cutter.clip_planes {
-            remainder = match remainder.split(*plane) {
+            remainder = match remainder.split_owned(*plane) {
                 SplitResult::Front(_) => return None,
                 SplitResult::Back(back) | SplitResult::Coplanar(back) => back,
                 SplitResult::Both { back, .. } => back,
@@ -253,7 +261,7 @@ impl ConvexSolid {
         categorized
     }
 
-    fn split(&self, plane: Plane) -> SplitResult {
+    fn split_owned(self, plane: Plane) -> SplitResult {
         let mut saw_front = false;
         let mut saw_back = false;
         for polygon in &self.polygons {
@@ -265,15 +273,15 @@ impl ConvexSolid {
         }
 
         match (saw_front, saw_back) {
-            (true, false) => return SplitResult::Front(self.clone()),
-            (false, true) => return SplitResult::Back(self.clone()),
-            (false, false) => return SplitResult::Coplanar(self.clone()),
+            (true, false) => return SplitResult::Front(self),
+            (false, true) => return SplitResult::Back(self),
+            (false, false) => return SplitResult::Coplanar(self),
             (true, true) => {}
         }
 
-        let mut front_polygons = Vec::new();
-        let mut back_polygons = Vec::new();
-        let mut cap_points = Vec::new();
+        let mut front_polygons = Vec::with_capacity(self.polygons.len() + 1);
+        let mut back_polygons = Vec::with_capacity(self.polygons.len() + 1);
+        let mut cap_points = Vec::with_capacity(self.polygons.len() * 2);
 
         for polygon in &self.polygons {
             let front = clip_polygon(&polygon.vertices, plane, KeepSide::Front, &mut cap_points);
@@ -404,7 +412,7 @@ fn clip_polygon(
     keep: KeepSide,
     cap_points: &mut Vec<Vec3>,
 ) -> Vec<Vec3> {
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(vertices.len() + 1);
     if vertices.is_empty() {
         return output;
     }

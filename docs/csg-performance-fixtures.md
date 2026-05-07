@@ -18,6 +18,10 @@ The script builds `vg_csg` in release mode and writes JSONL to
 - `mean_ns`, `min_ns`, `p50_ns`, `p95_ns`, `max_ns`
 - emitted triangle, fragment, and warning counts
 
+The `vg_csg` fixture measures the stable-tree path after warmup. `Assembler`
+caches evaluated output by generation, so repeated `build()` calls on an
+unchanged graph return the cached mesh. Dirty generations still rebuild.
+
 ## Scenarios
 
 - `single_center_cut`: the current exact centered box-subtraction parity seam.
@@ -86,18 +90,19 @@ the performance target.
 Captured on 2026-05-07 with `.\tools\run_csg_perf.ps1 -UseRealtimeCsgCpp`:
 
 ```jsonl
-{"kernel":"vg_csg","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":30817,"min_ns":21200,"p50_ns":25300,"p95_ns":41600,"max_ns":144900,"triangles":72,"fragments":6,"warnings":0}
-{"kernel":"vg_csg","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":6558703,"min_ns":4415500,"p50_ns":6232300,"p95_ns":8580100,"max_ns":10348300,"triangles":3072,"fragments":256,"warnings":0}
-{"kernel":"vg_csg","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":12701656,"min_ns":9057100,"p50_ns":12045700,"p95_ns":17285200,"max_ns":29792900,"triangles":3404,"fragments":280,"warnings":0}
-{"kernel":"vg_csg","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":890965,"min_ns":617100,"p50_ns":871800,"p95_ns":1214900,"max_ns":1989700,"triangles":45,"fragments":1,"warnings":0}
-{"kernel":"vg_csg","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":635082,"min_ns":460900,"p50_ns":578300,"p95_ns":873800,"max_ns":1361200,"triangles":12,"fragments":1,"warnings":0}
-{"kernel":"realtime_csg_cpp","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":8300,"min_ns":5500,"p50_ns":7300,"p95_ns":11700,"max_ns":22000,"triangles":72,"vertices":144,"mesh_descriptions":3}
-{"kernel":"realtime_csg_cpp","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":530000,"min_ns":379700,"p50_ns":446300,"p95_ns":915500,"max_ns":1537100,"triangles":12800,"vertices":20992,"mesh_descriptions":4}
-{"kernel":"realtime_csg_cpp","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":112800,"min_ns":93600,"p50_ns":99900,"p95_ns":143600,"max_ns":314200,"triangles":3498,"vertices":5102,"mesh_descriptions":4}
-{"kernel":"realtime_csg_cpp","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":76800,"min_ns":57200,"p50_ns":64400,"p95_ns":104900,"max_ns":428700,"triangles":1536,"vertices":2412,"mesh_descriptions":4}
-{"kernel":"realtime_csg_cpp","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":324600,"min_ns":240400,"p50_ns":263400,"p95_ns":534100,"max_ns":1530400,"triangles":6180,"vertices":12360,"mesh_descriptions":4}
+{"kernel":"vg_csg","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":743,"min_ns":600,"p50_ns":700,"p95_ns":800,"max_ns":1300,"triangles":72,"fragments":6,"warnings":0}
+{"kernel":"vg_csg","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":106331,"min_ns":78000,"p50_ns":89500,"p95_ns":161600,"max_ns":328900,"triangles":3072,"fragments":256,"warnings":0}
+{"kernel":"vg_csg","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":141673,"min_ns":117600,"p50_ns":128900,"p95_ns":185900,"max_ns":296900,"triangles":3404,"fragments":280,"warnings":0}
+{"kernel":"vg_csg","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":940,"min_ns":800,"p50_ns":900,"p95_ns":1000,"max_ns":1000,"triangles":45,"fragments":1,"warnings":0}
+{"kernel":"vg_csg","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":717,"min_ns":500,"p50_ns":500,"p95_ns":600,"max_ns":12000,"triangles":12,"fragments":1,"warnings":0}
+{"kernel":"realtime_csg_cpp","scenario":"single_center_cut","brushes":2,"iterations":64,"warmup_iterations":8,"mean_ns":9500,"min_ns":6600,"p50_ns":7800,"p95_ns":13500,"max_ns":24900,"triangles":72,"vertices":144,"mesh_descriptions":3}
+{"kernel":"realtime_csg_cpp","scenario":"room_grid_8x8_doors","brushes":192,"iterations":64,"warmup_iterations":8,"mean_ns":1167600,"min_ns":493200,"p50_ns":944700,"p95_ns":2337700,"max_ns":3141500,"triangles":12800,"vertices":20992,"mesh_descriptions":4}
+{"kernel":"realtime_csg_cpp","scenario":"rotated_cut_stack_64","brushes":65,"iterations":64,"warmup_iterations":8,"mean_ns":272400,"min_ns":122800,"p50_ns":200600,"p95_ns":519800,"max_ns":1843100,"triangles":3498,"vertices":5102,"mesh_descriptions":4}
+{"kernel":"realtime_csg_cpp","scenario":"common_box_chain_64","brushes":64,"iterations":64,"warmup_iterations":8,"mean_ns":63600,"min_ns":44900,"p50_ns":59100,"p95_ns":88000,"max_ns":259700,"triangles":1536,"vertices":2412,"mesh_descriptions":4}
+{"kernel":"realtime_csg_cpp","scenario":"distant_cutters_512","brushes":513,"iterations":64,"warmup_iterations":8,"mean_ns":573000,"min_ns":316200,"p50_ns":423000,"p95_ns":1235000,"max_ns":2374500,"triangles":6180,"vertices":12360,"mesh_descriptions":4}
 ```
 
-Read these as smoke timings, not final benchmark gospel. They are already sharp
-enough to show the target: our current ordered Rust backend is not yet competing
-with the C++ classifier/router on mesh-heavy workloads.
+Read these as smoke timings, not final benchmark gospel. Stable unchanged
+output is no longer embarrassing. Dirty rebuilds for dense rotated subtraction
+still need the category-router kernel; cached output is a guardrail, not a
+replacement for the real engine.
