@@ -22,9 +22,10 @@ pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Prim
 pub use convex::{CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane, PolygonRouteScratch};
 pub use domain::{
     ClaimLoweringTarget, ContributionRow, CsgClaimLowering, DomainFrame, DomainKey, DomainKind,
-    DomainNode, DomainQuery, DomainSummary, FeatureClaim, FeatureClaimKind, FieldEncoding,
-    FieldLayer, SelectedCut, TriangleChunk, lower_feature_claims_to_csg_tree, lower_selected_cut,
-    lower_selected_cut_chunks, ragnarok_column_fixture, select_domain_cut,
+    DomainNode, DomainNodeSpec, DomainQuery, DomainSummary, FeatureClaim, FeatureClaimKind,
+    FeatureClaimSpec, FieldEncoding, FieldLayer, SelectedCut, TriangleChunk,
+    lower_feature_claims_to_csg_tree, lower_selected_cut, lower_selected_cut_chunks,
+    ragnarok_column_fixture, ragnarok_column_spec, select_domain_cut,
 };
 pub use dsl::LevelDsl;
 pub use frontier::{DemandFrontier, DemandPair, DirtyDemandFrontier};

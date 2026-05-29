@@ -192,6 +192,97 @@ pub struct DomainNode {
     pub children: Vec<DomainNode>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeatureClaimSpec {
+    pub name: String,
+    pub frame: DomainFrame,
+    pub support: Aabb,
+    pub kind: FeatureClaimKind,
+    pub material: MaterialId,
+}
+
+impl FeatureClaimSpec {
+    pub fn new(
+        name: impl Into<String>,
+        frame: DomainFrame,
+        support: Aabb,
+        kind: FeatureClaimKind,
+        material: MaterialId,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            frame,
+            support,
+            kind,
+            material,
+        }
+    }
+
+    pub fn compile(&self, domain_key: &DomainKey) -> FeatureClaim {
+        FeatureClaim {
+            key: format!("{}/claim/{}", domain_key.0, self.name),
+            domain_key: domain_key.clone(),
+            frame: self.frame,
+            support: self.support,
+            kind: self.kind,
+            material: self.material,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DomainNodeSpec {
+    pub name: String,
+    pub kind: DomainKind,
+    pub frame: DomainFrame,
+    pub seed: u64,
+    pub claims: Vec<FeatureClaimSpec>,
+    pub children: Vec<DomainNodeSpec>,
+}
+
+impl DomainNodeSpec {
+    pub fn new(name: impl Into<String>, kind: DomainKind, frame: DomainFrame, seed: u64) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            frame,
+            seed,
+            claims: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn with_claim(mut self, claim: FeatureClaimSpec) -> Self {
+        self.claims.push(claim);
+        self
+    }
+
+    pub fn with_child(mut self, child: DomainNodeSpec) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    pub fn compile_root(&self) -> DomainNode {
+        self.compile(DomainKey::new(self.name.clone()), None)
+    }
+
+    fn compile(&self, key: DomainKey, parent: Option<DomainKey>) -> DomainNode {
+        let claims = self
+            .claims
+            .iter()
+            .map(|claim| claim.compile(&key))
+            .collect::<Vec<_>>();
+        let children = self
+            .children
+            .iter()
+            .map(|child| child.compile(key.child(&child.name), Some(key.clone())))
+            .collect::<Vec<_>>();
+        DomainNode::new(
+            key, parent, self.kind, self.frame, self.seed, claims, children,
+        )
+    }
+}
+
 impl DomainNode {
     pub fn new(
         key: DomainKey,
@@ -534,264 +625,216 @@ fn build_claim_tree(
 }
 
 pub fn ragnarok_column_fixture() -> DomainNode {
-    let root_key = DomainKey::new("ragnarok-column");
-    let column_key = root_key.child("stellarator-column-00");
-    let mut bands = Vec::new();
-    for index in 0..3 {
-        bands.push(ragnarok_band(&column_key, index));
-    }
-    let support = claim(
-        &column_key,
+    ragnarok_column_spec().compile_root()
+}
+
+pub fn ragnarok_column_spec() -> DomainNodeSpec {
+    let mut column = DomainNodeSpec::new(
+        "stellarator-column-00",
+        DomainKind::Column,
+        DomainFrame::IDENTITY,
+        0xC011_0000,
+    )
+    .with_claim(claim_spec(
         "column-support-shell",
         DomainFrame::IDENTITY,
         Aabb::from_center_size(Vec3::new(0.0, 0.0, 45.0), Vec3::new(18.0, 18.0, 96.0)),
         FeatureClaimKind::SupportShell,
         MaterialId(10),
-    );
-    let clearance = claim(
-        &column_key,
+    ))
+    .with_claim(claim_spec(
         "column-core-clearance",
         DomainFrame::IDENTITY,
         Aabb::from_center_size(Vec3::new(0.0, 0.0, 45.0), Vec3::new(7.0, 7.0, 100.0)),
         FeatureClaimKind::ClearanceVolume,
         MaterialId(0),
-    );
-    let column = DomainNode::new(
-        column_key.clone(),
-        Some(root_key.clone()),
-        DomainKind::Column,
-        DomainFrame::IDENTITY,
-        0xC011_0000,
-        vec![support, clearance],
-        bands,
-    );
-    DomainNode::new(
-        root_key,
-        None,
+    ));
+    for index in 0..3 {
+        column = column.with_child(ragnarok_band(index));
+    }
+
+    DomainNodeSpec::new(
+        "ragnarok-column",
         DomainKind::Root,
         DomainFrame::IDENTITY,
         0x5EED,
-        Vec::new(),
-        vec![column],
     )
+    .with_child(column)
 }
 
-fn ragnarok_band(column_key: &DomainKey, index: usize) -> DomainNode {
-    let key = column_key.child(format!("altitude-band-{index}"));
+fn ragnarok_band(index: usize) -> DomainNodeSpec {
     let z = 15.0 + index as f32 * 30.0;
     let frame = DomainFrame::translated(Vec3::new(0.0, 0.0, z));
-    let fallback = claim(
-        &key,
+    let mut band = DomainNodeSpec::new(
+        format!("altitude-band-{index}"),
+        DomainKind::AltitudeBand,
+        frame,
+        0xBADD_0000 + index as u64,
+    )
+    .with_claim(claim_spec(
         "coarse-ring-road",
         frame,
         Aabb::from_center_size(Vec3::ZERO, Vec3::new(34.0, 5.0, 1.0)),
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(20 + index as u32),
-    );
-    let mut children = Vec::new();
+    ));
     for lane in 0..2 {
-        children.push(ragnarok_branch(&key, index, lane));
+        band = band.with_child(ragnarok_branch(index, lane));
     }
-    children.push(ragnarok_roundabout(&key, index));
-    DomainNode::new(
-        key,
-        Some(column_key.clone()),
-        DomainKind::AltitudeBand,
-        frame,
-        0xBADD_0000 + index as u64,
-        vec![fallback],
-        children,
-    )
+    band.with_child(ragnarok_roundabout(index))
 }
 
-fn ragnarok_branch(parent: &DomainKey, band: usize, lane: usize) -> DomainNode {
-    let key = parent.child(format!("branch-road-{lane}"));
+fn ragnarok_branch(band: usize, lane: usize) -> DomainNodeSpec {
     let angle = band as f32 * 0.41 + lane as f32 * std::f32::consts::PI;
     let radius = 16.0 + lane as f32 * 5.0;
     let frame = DomainFrame::rotated_z(
         Vec3::new(angle.cos() * radius, angle.sin() * radius, 0.0),
         angle,
     );
-    let road = claim(
-        &key,
+    let mut branch = DomainNodeSpec::new(
+        format!("branch-road-{lane}"),
+        DomainKind::BranchRoad,
+        frame,
+        0xA11E_0000 + (band * 10 + lane) as u64,
+    )
+    .with_claim(claim_spec(
         "road-slab",
         frame,
         Aabb::from_center_size(Vec3::new(7.0, 0.0, 0.0), Vec3::new(18.0, 4.0, 0.8)),
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(40 + band as u32),
-    );
-    let void = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "hover-clearance",
         frame,
         Aabb::from_center_size(Vec3::new(7.0, 0.0, 2.2), Vec3::new(17.0, 3.0, 2.0)),
         FeatureClaimKind::ClearanceVolume,
         MaterialId(0),
-    );
-    let rib = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "coarse-support-rib",
         frame,
         Aabb::from_center_size(Vec3::new(7.0, 0.0, -1.0), Vec3::new(18.5, 1.0, 1.5)),
         FeatureClaimKind::SupportShell,
         MaterialId(12),
-    );
-    let mut children = Vec::new();
+    ));
     for segment in 0..3 {
-        children.push(ragnarok_road_chunk(&key, band, lane, segment, frame));
+        branch = branch.with_child(ragnarok_road_chunk(band, lane, segment, frame));
     }
-    DomainNode::new(
-        key,
-        Some(parent.clone()),
-        DomainKind::BranchRoad,
-        frame,
-        0xA11E_0000 + (band * 10 + lane) as u64,
-        vec![road, void, rib],
-        children,
-    )
+    branch
 }
 
-fn ragnarok_roundabout(parent: &DomainKey, band: usize) -> DomainNode {
-    let key = parent.child("roundabout");
+fn ragnarok_roundabout(band: usize) -> DomainNodeSpec {
     let frame = DomainFrame::translated(Vec3::ZERO);
-    let crossing_a = claim(
-        &key,
+    let mut roundabout = DomainNodeSpec::new(
+        "roundabout",
+        DomainKind::Roundabout,
+        frame,
+        0xF00D_0000 + band as u64,
+    )
+    .with_claim(claim_spec(
         "roundabout-east-west",
         frame,
         Aabb::from_center_size(Vec3::ZERO, Vec3::new(26.0, 4.5, 0.9)),
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(60 + band as u32),
-    );
-    let crossing_b = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "roundabout-north-south",
         DomainFrame::rotated_z(Vec3::ZERO, std::f32::consts::FRAC_PI_2),
         Aabb::from_center_size(Vec3::ZERO, Vec3::new(26.0, 4.5, 0.9)),
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(60 + band as u32),
-    );
-    let mut children = Vec::new();
+    ));
     for quadrant in 0..4 {
-        children.push(ragnarok_roundabout_chunk(&key, band, quadrant));
+        roundabout = roundabout.with_child(ragnarok_roundabout_chunk(band, quadrant));
     }
-    DomainNode::new(
-        key,
-        Some(parent.clone()),
-        DomainKind::Roundabout,
-        frame,
-        0xF00D_0000 + band as u64,
-        vec![crossing_a, crossing_b],
-        children,
-    )
+    roundabout
 }
 
 fn ragnarok_road_chunk(
-    parent: &DomainKey,
     band: usize,
     lane: usize,
     segment: usize,
     frame: DomainFrame,
-) -> DomainNode {
-    let key = parent.child(format!("chunk-{segment}"));
+) -> DomainNodeSpec {
     let x = 1.5 + segment as f32 * 5.5;
-    let road = claim(
-        &key,
+    DomainNodeSpec::new(
+        format!("chunk-{segment}"),
+        DomainKind::Chunk,
+        frame,
+        0xC40B_0000 + (band * 100 + lane * 10 + segment) as u64,
+    )
+    .with_claim(claim_spec(
         "road-slab",
         frame,
         Aabb::from_center_size(Vec3::new(x, 0.0, 0.0), Vec3::new(6.5, 4.0, 0.75)),
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(80 + band as u32),
-    );
-    let clearance = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "hover-clearance",
         frame,
         Aabb::from_center_size(Vec3::new(x, 0.0, 2.1), Vec3::new(6.0, 3.0, 1.9)),
         FeatureClaimKind::ClearanceVolume,
         MaterialId(0),
-    );
-    let support = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "support-rib",
         frame,
         Aabb::from_center_size(Vec3::new(x, 0.0, -1.05), Vec3::new(6.8, 0.9, 1.4)),
         FeatureClaimKind::SupportShell,
         MaterialId(90 + lane as u32),
-    );
-    let collider = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "collider-proxy",
         frame,
         Aabb::from_center_size(Vec3::new(x, 0.0, 0.35), Vec3::new(6.8, 4.2, 0.35)),
         FeatureClaimKind::ColliderProxy,
         MaterialId(0),
-    );
-    DomainNode::new(
-        key,
-        Some(parent.clone()),
-        DomainKind::Chunk,
-        frame,
-        0xC40B_0000 + (band * 100 + lane * 10 + segment) as u64,
-        vec![road, clearance, support, collider],
-        Vec::new(),
-    )
+    ))
 }
 
-fn ragnarok_roundabout_chunk(parent: &DomainKey, band: usize, quadrant: usize) -> DomainNode {
-    let key = parent.child(format!("chunk-{quadrant}"));
+fn ragnarok_roundabout_chunk(band: usize, quadrant: usize) -> DomainNodeSpec {
     let angle = quadrant as f32 * std::f32::consts::FRAC_PI_2;
     let frame = DomainFrame::rotated_z(Vec3::ZERO, angle);
-    let road = claim(
-        &key,
+    DomainNodeSpec::new(
+        format!("chunk-{quadrant}"),
+        DomainKind::Chunk,
+        frame,
+        0xC10C_0000 + (band * 10 + quadrant) as u64,
+    )
+    .with_claim(claim_spec(
         "arc-road-slab",
         frame,
         Aabb::from_center_size(Vec3::new(5.0, 5.0, 0.0), Vec3::new(12.0, 4.0, 0.8)),
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(100 + band as u32),
-    );
-    let clearance = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "arc-clearance",
         frame,
         Aabb::from_center_size(Vec3::new(5.0, 5.0, 2.1), Vec3::new(11.0, 3.0, 1.8)),
         FeatureClaimKind::ClearanceVolume,
         MaterialId(0),
-    );
-    let support = claim(
-        &key,
+    ))
+    .with_claim(claim_spec(
         "arc-support",
         frame,
         Aabb::from_center_size(Vec3::new(5.0, 5.0, -1.0), Vec3::new(12.5, 0.8, 1.2)),
         FeatureClaimKind::SupportShell,
         MaterialId(90),
-    );
-    DomainNode::new(
-        key,
-        Some(parent.clone()),
-        DomainKind::Chunk,
-        frame,
-        0xC10C_0000 + (band * 10 + quadrant) as u64,
-        vec![road, clearance, support],
-        Vec::new(),
-    )
+    ))
 }
 
-fn claim(
-    domain_key: &DomainKey,
+fn claim_spec(
     name: &str,
     frame: DomainFrame,
     support: Aabb,
     kind: FeatureClaimKind,
     material: MaterialId,
-) -> FeatureClaim {
-    FeatureClaim {
-        key: format!("{}/claim/{name}", domain_key.0),
-        domain_key: domain_key.clone(),
-        frame,
-        support,
-        kind,
-        material,
-    }
+) -> FeatureClaimSpec {
+    FeatureClaimSpec::new(name, frame, support, kind, material)
 }
 
 fn fallback_box_claim(
@@ -992,6 +1035,27 @@ mod tests {
         let b = ragnarok_column_fixture();
         assert_eq!(a.key, b.key);
         assert_eq!(a.children[0].children[1].key, b.children[0].children[1].key);
+    }
+
+    #[test]
+    fn domain_tree_spec_compiles_stable_parent_claim_identity() {
+        let spec = DomainNodeSpec::new("root", DomainKind::Root, DomainFrame::IDENTITY, 1)
+            .with_child(
+                DomainNodeSpec::new("road", DomainKind::BranchRoad, DomainFrame::IDENTITY, 2)
+                    .with_claim(FeatureClaimSpec::new(
+                        "slab",
+                        DomainFrame::IDENTITY,
+                        Aabb::from_center_size(Vec3::ZERO, Vec3::ONE),
+                        FeatureClaimKind::RoadSurfaceSlab,
+                        MaterialId(1),
+                    )),
+            );
+        let domain = spec.compile_root();
+        let road = &domain.children[0];
+        assert_eq!(road.key, DomainKey::new("root/road"));
+        assert_eq!(road.parent, Some(domain.key.clone()));
+        assert_eq!(road.claims[0].key, "root/road/claim/slab");
+        assert_eq!(road.claims[0].domain_key, road.key);
     }
 
     #[test]
