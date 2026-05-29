@@ -5,7 +5,7 @@ use std::{
 
 use bevy_math::{Quat, Vec3};
 use vg_csg::{
-    Aabb, Assembler, BrushOp, DomainQuery, MaterialId, Primitive, lower_selected_cut,
+    Aabb, Assembler, BrushOp, DomainQuery, MaterialId, Primitive, lower_selected_cut_chunks,
     ragnarok_column_fixture, select_domain_cut,
 };
 
@@ -240,13 +240,23 @@ fn percentile_ns(values: &[Duration], percentile: usize) -> u128 {
 fn run_lod_case(name: &'static str, query: DomainQuery) {
     let fixture = ragnarok_column_fixture();
     let warmup_cut = select_domain_cut(&fixture, &query);
-    let warmup_chunk = lower_selected_cut(&warmup_cut);
-    black_box(warmup_chunk.mesh.triangle_count());
+    let warmup_chunks = lower_selected_cut_chunks(&warmup_cut);
+    black_box(
+        warmup_chunks
+            .iter()
+            .map(|chunk| chunk.mesh.triangle_count())
+            .sum::<usize>(),
+    );
 
     for _ in 0..WARMUP_ITERS {
         let cut = select_domain_cut(&fixture, &query);
-        let chunk = lower_selected_cut(&cut);
-        black_box(chunk.mesh.triangle_count());
+        let chunks = lower_selected_cut_chunks(&cut);
+        black_box(
+            chunks
+                .iter()
+                .map(|chunk| chunk.mesh.triangle_count())
+                .sum::<usize>(),
+        );
     }
 
     let mut timings = Vec::with_capacity(MEASURE_ITERS);
@@ -261,18 +271,26 @@ fn run_lod_case(name: &'static str, query: DomainQuery) {
     for _ in 0..MEASURE_ITERS {
         let start = Instant::now();
         let cut = select_domain_cut(&fixture, &query);
-        let chunk = lower_selected_cut(&cut);
+        let chunks = lower_selected_cut_chunks(&cut);
         let elapsed = start.elapsed();
         selected_nodes = cut.selected_nodes.len();
         emitted_claims = cut.emitted_claims.len();
-        triangles = chunk.mesh.triangle_count();
-        collider_triangles = chunk
-            .collider_mesh
-            .as_ref()
-            .map_or(0, |mesh| mesh.triangle_count());
-        brush_count = chunk.report.input_brushes;
-        candidate_pairs = chunk.report.candidate_pairs;
-        rejected_pairs = chunk.report.rejected_pairs;
+        triangles = chunks.iter().map(|chunk| chunk.mesh.triangle_count()).sum();
+        collider_triangles = chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .collider_mesh
+                    .as_ref()
+                    .map_or(0, |mesh| mesh.triangle_count())
+            })
+            .sum();
+        brush_count = chunks.iter().map(|chunk| chunk.report.input_brushes).sum();
+        candidate_pairs = chunks
+            .iter()
+            .map(|chunk| chunk.report.candidate_pairs)
+            .sum();
+        rejected_pairs = chunks.iter().map(|chunk| chunk.report.rejected_pairs).sum();
         black_box((
             selected_nodes,
             emitted_claims,

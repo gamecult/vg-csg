@@ -1,6 +1,9 @@
 use bevy_math::{Quat, Vec3};
 
-use crate::{Aabb, Assembler, BrushOp, BuildReport, MaterialId, Primitive, TriangleMesh};
+use crate::{
+    Aabb, BrushOp, BuildReport, CsgBranchOp, CsgNodeId, CsgOperationType, CsgTreeArena, MaterialId,
+    Primitive, TriangleMesh,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DomainKey(pub String);
@@ -122,18 +125,18 @@ impl FeatureClaimKind {
         }
     }
 
-    fn brush_op(self) -> BrushOp {
+    pub fn brush_op(self) -> BrushOp {
         match self {
             Self::VoidBrush | Self::ClearanceVolume => BrushOp::Subtract,
             _ => BrushOp::Add,
         }
     }
 
-    fn emits_render(self) -> bool {
+    pub fn emits_render(self) -> bool {
         !matches!(self, Self::ColliderProxy | Self::ClearanceVolume)
     }
 
-    fn emits_collider(self) -> bool {
+    pub fn emits_collider(self) -> bool {
         matches!(
             self,
             Self::SolidBrush | Self::RoadSurfaceSlab | Self::SupportShell | Self::ColliderProxy
@@ -156,7 +159,7 @@ impl FeatureClaim {
         self.frame.transform_bounds(self.support)
     }
 
-    fn primitive(&self) -> Primitive {
+    pub fn primitive(&self) -> Primitive {
         Primitive::OrientedBox {
             center: self.frame.transform_point(self.support.center()),
             size: self.support.size(),
@@ -278,8 +281,12 @@ pub struct ContributionRow {
     pub kind: DomainKind,
     pub contribution: f32,
     pub estimated_triangle_cost: usize,
+    pub child_cost: usize,
+    pub remaining_triangle_budget: usize,
+    pub requested: bool,
     pub selected: bool,
     pub used_fallback: bool,
+    pub deferred_by_budget: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -304,6 +311,21 @@ pub struct TriangleChunk {
     pub report: BuildReport,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClaimLoweringTarget {
+    Render,
+    Collider,
+}
+
+#[derive(Clone, Debug)]
+pub struct CsgClaimLowering {
+    pub arena: CsgTreeArena,
+    pub root: Option<CsgNodeId>,
+    pub bounds: Aabb,
+    pub source_domain_keys: Vec<DomainKey>,
+    pub source_claim_keys: Vec<String>,
+}
+
 pub fn select_domain_cut(root: &DomainNode, query: &DomainQuery) -> SelectedCut {
     let mut state = CutState {
         query,
@@ -313,6 +335,7 @@ pub fn select_domain_cut(root: &DomainNode, query: &DomainQuery) -> SelectedCut 
         fallback: Vec::new(),
         diagnostics: Vec::new(),
         remaining_triangles: query.triangle_budget,
+        remaining_colliders: query.collider_budget,
     };
     state.visit(root, true);
     SelectedCut {
@@ -326,50 +349,188 @@ pub fn select_domain_cut(root: &DomainNode, query: &DomainQuery) -> SelectedCut 
 }
 
 pub fn lower_selected_cut(cut: &SelectedCut) -> TriangleChunk {
-    let mut render_assembler = Assembler::new();
-    let mut collider_assembler = Assembler::new();
+    lower_claims_to_chunk(
+        DomainKey::new(format!("chunk/{}", cut.id)),
+        &cut.id,
+        &cut.emitted_claims,
+    )
+}
+
+pub fn lower_selected_cut_chunks(cut: &SelectedCut) -> Vec<TriangleChunk> {
+    let mut chunks = Vec::new();
+    for domain_key in &cut.selected_nodes {
+        let claims = cut
+            .emitted_claims
+            .iter()
+            .filter(|claim| &claim.domain_key == domain_key)
+            .cloned()
+            .collect::<Vec<_>>();
+        if claims.is_empty() {
+            continue;
+        }
+        chunks.push(lower_claims_to_chunk(
+            DomainKey::new(format!("chunk/{}/{}", cut.id, domain_key.0)),
+            &cut.id,
+            &claims,
+        ));
+    }
+    chunks
+}
+
+pub fn lower_feature_claims_to_csg_tree(
+    claims: &[FeatureClaim],
+    target: ClaimLoweringTarget,
+) -> CsgClaimLowering {
+    let mut arena = CsgTreeArena::new();
+    let mut additive_nodes = Vec::new();
+    let mut subtractive_nodes = Vec::new();
     let mut source_domain_keys = Vec::<DomainKey>::new();
     let mut source_claim_keys = Vec::<String>::new();
     let mut bounds = Aabb::empty();
 
-    for claim in &cut.emitted_claims {
+    for claim in claims.iter().filter(|claim| claim_in_target(claim, target)) {
         source_claim_keys.push(claim.key.clone());
         if !source_domain_keys.contains(&claim.domain_key) {
             source_domain_keys.push(claim.domain_key.clone());
         }
         bounds = bounds.union(claim.world_bounds());
-        if claim.kind.emits_render() || matches!(claim.kind, FeatureClaimKind::VoidBrush) {
-            render_assembler.add_brush(
-                claim.key.clone(),
-                claim.kind.brush_op(),
-                claim.primitive(),
-                claim.material,
-            );
-        }
-        if claim.kind.emits_collider() || matches!(claim.kind, FeatureClaimKind::VoidBrush) {
-            collider_assembler.add_brush(
-                claim.key.clone(),
-                claim.kind.brush_op(),
-                claim.primitive(),
-                claim.material,
-            );
+        let brush = arena.generate_brush(
+            claim.key.clone(),
+            CsgOperationType::Additive,
+            claim.primitive(),
+            claim.material,
+        );
+        match claim.kind.brush_op() {
+            BrushOp::Add => additive_nodes.push(brush.node),
+            BrushOp::Subtract => subtractive_nodes.push(brush.node),
+            BrushOp::Intersect => additive_nodes.push(brush.node),
         }
     }
 
-    let output = render_assembler.build();
-    let collider_output =
-        (!collider_assembler.brushes().is_empty()).then(|| collider_assembler.build());
+    let root = build_claim_tree(&mut arena, additive_nodes, subtractive_nodes);
+    CsgClaimLowering {
+        arena,
+        root,
+        bounds,
+        source_domain_keys,
+        source_claim_keys,
+    }
+}
+
+fn lower_claims_to_chunk(
+    key: DomainKey,
+    selected_cut_id: &str,
+    claims: &[FeatureClaim],
+) -> TriangleChunk {
+    let render = lower_feature_claims_to_csg_tree(claims, ClaimLoweringTarget::Render);
+    let collider = lower_feature_claims_to_csg_tree(claims, ClaimLoweringTarget::Collider);
+    let (source_domain_keys, source_claim_keys) = claim_metadata(claims);
+
+    let output = render
+        .root
+        .map(|root| {
+            render
+                .arena
+                .compile_tree_to_assembler(render.arena.generate_tree(root))
+                .build()
+        })
+        .unwrap_or_else(|| crate::Assembler::new().build());
+    let collider_output = collider.root.map(|root| {
+        collider
+            .arena
+            .compile_tree_to_assembler(collider.arena.generate_tree(root))
+            .build()
+    });
 
     TriangleChunk {
-        key: DomainKey::new(format!("chunk/{}", cut.id)),
-        selected_cut_id: cut.id.clone(),
-        bounds,
+        key,
+        selected_cut_id: selected_cut_id.to_owned(),
+        bounds: render.bounds.union(collider.bounds),
         mesh: output.mesh,
         collider_mesh: collider_output.map(|output| output.mesh),
         source_domain_keys,
         source_claim_keys,
         report: output.report,
     }
+}
+
+fn claim_metadata(claims: &[FeatureClaim]) -> (Vec<DomainKey>, Vec<String>) {
+    let mut source_domain_keys = Vec::<DomainKey>::new();
+    let mut source_claim_keys = Vec::<String>::new();
+    for claim in claims {
+        source_claim_keys.push(claim.key.clone());
+        if !source_domain_keys.contains(&claim.domain_key) {
+            source_domain_keys.push(claim.domain_key.clone());
+        }
+    }
+    (source_domain_keys, source_claim_keys)
+}
+
+fn claim_in_target(claim: &FeatureClaim, target: ClaimLoweringTarget) -> bool {
+    match target {
+        ClaimLoweringTarget::Render => {
+            claim.kind.emits_render()
+                || matches!(
+                    claim.kind,
+                    FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume
+                )
+        }
+        ClaimLoweringTarget::Collider => {
+            claim.kind.emits_collider()
+                || matches!(
+                    claim.kind,
+                    FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume
+                )
+        }
+    }
+}
+
+fn build_claim_tree(
+    arena: &mut CsgTreeArena,
+    additive_nodes: Vec<CsgNodeId>,
+    subtractive_nodes: Vec<CsgNodeId>,
+) -> Option<CsgNodeId> {
+    let additive_root = match additive_nodes.len() {
+        0 => None,
+        1 => additive_nodes.first().copied(),
+        _ => Some(
+            arena
+                .generate_branch(
+                    "domain-additive-claims",
+                    CsgBranchOp::Addition,
+                    additive_nodes,
+                )
+                .node,
+        ),
+    }?;
+
+    if subtractive_nodes.is_empty() {
+        return Some(additive_root);
+    }
+
+    let subtractive_root = match subtractive_nodes.len() {
+        0 => unreachable!(),
+        1 => subtractive_nodes[0],
+        _ => {
+            arena
+                .generate_branch(
+                    "domain-subtractive-claims",
+                    CsgBranchOp::Addition,
+                    subtractive_nodes,
+                )
+                .node
+        }
+    };
+
+    Some(
+        arena
+            .generate_branch(
+                "domain-claims",
+                CsgBranchOp::Subtraction,
+                [additive_root, subtractive_root],
+            )
+            .node,
+    )
 }
 
 pub fn ragnarok_column_fixture() -> DomainNode {
@@ -467,14 +628,26 @@ fn ragnarok_branch(parent: &DomainKey, band: usize, lane: usize) -> DomainNode {
         FeatureClaimKind::ClearanceVolume,
         MaterialId(0),
     );
+    let rib = claim(
+        &key,
+        "coarse-support-rib",
+        frame,
+        Aabb::from_center_size(Vec3::new(7.0, 0.0, -1.0), Vec3::new(18.5, 1.0, 1.5)),
+        FeatureClaimKind::SupportShell,
+        MaterialId(12),
+    );
+    let mut children = Vec::new();
+    for segment in 0..3 {
+        children.push(ragnarok_road_chunk(&key, band, lane, segment, frame));
+    }
     DomainNode::new(
         key,
         Some(parent.clone()),
         DomainKind::BranchRoad,
         frame,
         0xA11E_0000 + (band * 10 + lane) as u64,
-        vec![road, void],
-        Vec::new(),
+        vec![road, void, rib],
+        children,
     )
 }
 
@@ -497,6 +670,10 @@ fn ragnarok_roundabout(parent: &DomainKey, band: usize) -> DomainNode {
         FeatureClaimKind::RoadSurfaceSlab,
         MaterialId(60 + band as u32),
     );
+    let mut children = Vec::new();
+    for quadrant in 0..4 {
+        children.push(ragnarok_roundabout_chunk(&key, band, quadrant));
+    }
     DomainNode::new(
         key,
         Some(parent.clone()),
@@ -504,6 +681,97 @@ fn ragnarok_roundabout(parent: &DomainKey, band: usize) -> DomainNode {
         frame,
         0xF00D_0000 + band as u64,
         vec![crossing_a, crossing_b],
+        children,
+    )
+}
+
+fn ragnarok_road_chunk(
+    parent: &DomainKey,
+    band: usize,
+    lane: usize,
+    segment: usize,
+    frame: DomainFrame,
+) -> DomainNode {
+    let key = parent.child(format!("chunk-{segment}"));
+    let x = 1.5 + segment as f32 * 5.5;
+    let road = claim(
+        &key,
+        "road-slab",
+        frame,
+        Aabb::from_center_size(Vec3::new(x, 0.0, 0.0), Vec3::new(6.5, 4.0, 0.75)),
+        FeatureClaimKind::RoadSurfaceSlab,
+        MaterialId(80 + band as u32),
+    );
+    let clearance = claim(
+        &key,
+        "hover-clearance",
+        frame,
+        Aabb::from_center_size(Vec3::new(x, 0.0, 2.1), Vec3::new(6.0, 3.0, 1.9)),
+        FeatureClaimKind::ClearanceVolume,
+        MaterialId(0),
+    );
+    let support = claim(
+        &key,
+        "support-rib",
+        frame,
+        Aabb::from_center_size(Vec3::new(x, 0.0, -1.05), Vec3::new(6.8, 0.9, 1.4)),
+        FeatureClaimKind::SupportShell,
+        MaterialId(90 + lane as u32),
+    );
+    let collider = claim(
+        &key,
+        "collider-proxy",
+        frame,
+        Aabb::from_center_size(Vec3::new(x, 0.0, 0.35), Vec3::new(6.8, 4.2, 0.35)),
+        FeatureClaimKind::ColliderProxy,
+        MaterialId(0),
+    );
+    DomainNode::new(
+        key,
+        Some(parent.clone()),
+        DomainKind::Chunk,
+        frame,
+        0xC40B_0000 + (band * 100 + lane * 10 + segment) as u64,
+        vec![road, clearance, support, collider],
+        Vec::new(),
+    )
+}
+
+fn ragnarok_roundabout_chunk(parent: &DomainKey, band: usize, quadrant: usize) -> DomainNode {
+    let key = parent.child(format!("chunk-{quadrant}"));
+    let angle = quadrant as f32 * std::f32::consts::FRAC_PI_2;
+    let frame = DomainFrame::rotated_z(Vec3::ZERO, angle);
+    let road = claim(
+        &key,
+        "arc-road-slab",
+        frame,
+        Aabb::from_center_size(Vec3::new(5.0, 5.0, 0.0), Vec3::new(12.0, 4.0, 0.8)),
+        FeatureClaimKind::RoadSurfaceSlab,
+        MaterialId(100 + band as u32),
+    );
+    let clearance = claim(
+        &key,
+        "arc-clearance",
+        frame,
+        Aabb::from_center_size(Vec3::new(5.0, 5.0, 2.1), Vec3::new(11.0, 3.0, 1.8)),
+        FeatureClaimKind::ClearanceVolume,
+        MaterialId(0),
+    );
+    let support = claim(
+        &key,
+        "arc-support",
+        frame,
+        Aabb::from_center_size(Vec3::new(5.0, 5.0, -1.0), Vec3::new(12.5, 0.8, 1.2)),
+        FeatureClaimKind::SupportShell,
+        MaterialId(90),
+    );
+    DomainNode::new(
+        key,
+        Some(parent.clone()),
+        DomainKind::Chunk,
+        frame,
+        0xC10C_0000 + (band * 10 + quadrant) as u64,
+        vec![road, clearance, support],
         Vec::new(),
     )
 }
@@ -589,36 +857,64 @@ struct CutState<'a> {
     fallback: Vec<DomainKey>,
     diagnostics: Vec<ContributionRow>,
     remaining_triangles: usize,
+    remaining_colliders: usize,
 }
 
 impl CutState<'_> {
     fn visit(&mut self, node: &DomainNode, force_visit: bool) {
-        if !force_visit && !node.summary.bounds.intersects(self.query.frustum) {
+        let requested_self = self.query.requested_chunk_keys.contains(&node.key);
+        let requested_descendant = has_requested_descendant(node, &self.query.requested_chunk_keys);
+        if !force_visit
+            && !requested_self
+            && !requested_descendant
+            && !node.summary.bounds.intersects(self.query.frustum)
+        {
             return;
         }
         let score = contribution(node, self.query);
         let child_cost = node
             .children
             .iter()
-            .map(|child| child.summary.estimated_triangle_cost)
+            .map(selection_triangle_cost)
             .sum::<usize>();
-        let requested = self.query.requested_chunk_keys.contains(&node.key);
+        let child_collider_cost = node
+            .children
+            .iter()
+            .map(selection_collider_cost)
+            .sum::<usize>();
+        let budget_allows_children = child_cost <= self.remaining_triangles
+            && child_collider_cost <= self.remaining_colliders;
+        let descend_for_detail = score >= self.query.target_error && budget_allows_children;
+        let descend_for_request = requested_descendant && !requested_self;
         let should_descend = node.summary.has_children
-            && (requested || score >= self.query.target_error)
-            && child_cost <= self.remaining_triangles;
+            && !requested_self
+            && (descend_for_request || descend_for_detail);
         self.diagnostics.push(ContributionRow {
             domain_key: node.key.clone(),
             kind: node.kind,
             contribution: score,
             estimated_triangle_cost: node.summary.estimated_triangle_cost,
+            child_cost,
+            remaining_triangle_budget: self.remaining_triangles,
+            requested: requested_self,
             selected: !should_descend && self.query.accepts_kind(node.kind),
             used_fallback: !should_descend && node.summary.has_children,
+            deferred_by_budget: node.summary.has_children
+                && !requested_self
+                && score >= self.query.target_error
+                && !budget_allows_children,
         });
 
         if should_descend {
-            self.remaining_triangles = self.remaining_triangles.saturating_sub(child_cost);
+            if budget_allows_children {
+                self.remaining_triangles = self.remaining_triangles.saturating_sub(child_cost);
+                self.remaining_colliders =
+                    self.remaining_colliders.saturating_sub(child_collider_cost);
+            }
             for child in &node.children {
-                self.visit(child, false);
+                let child_requested = self.query.requested_chunk_keys.contains(&child.key)
+                    || has_requested_descendant(child, &self.query.requested_chunk_keys);
+                self.visit(child, child_requested);
             }
             return;
         }
@@ -637,6 +933,41 @@ impl CutState<'_> {
             self.claims.extend(claims.iter().cloned());
         }
     }
+}
+
+fn selection_triangle_cost(node: &DomainNode) -> usize {
+    let claim_count = if node.summary.has_children {
+        node.summary.fallback_claims.len()
+    } else {
+        node.claims.len()
+    };
+    claim_count.max(1) * 12
+}
+
+fn selection_collider_cost(node: &DomainNode) -> usize {
+    let claims = if node.summary.has_children {
+        &node.summary.fallback_claims
+    } else {
+        &node.claims
+    };
+    claims
+        .iter()
+        .filter(|claim| {
+            claim.kind.emits_collider()
+                || matches!(
+                    claim.kind,
+                    FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume
+                )
+        })
+        .count()
+        .max(1)
+        * 12
+}
+
+fn has_requested_descendant(node: &DomainNode, requested: &[DomainKey]) -> bool {
+    node.children
+        .iter()
+        .any(|child| requested.contains(&child.key) || has_requested_descendant(child, requested))
 }
 
 #[cfg(test)]
@@ -698,6 +1029,16 @@ mod tests {
     }
 
     #[test]
+    fn selected_cut_honors_collider_budget() {
+        let fixture = ragnarok_column_fixture();
+        let mut collider_tight = query(0.01, 10_000);
+        collider_tight.collider_budget = 1;
+        let cut = select_domain_cut(&fixture, &collider_tight);
+        assert_eq!(cut.selected_nodes, vec![fixture.key.clone()]);
+        assert!(cut.diagnostics[0].deferred_by_budget);
+    }
+
+    #[test]
     fn missing_children_degrade_to_parent_fallback_claims() {
         let fixture = ragnarok_column_fixture();
         let cut = select_domain_cut(&fixture, &query(10_000.0, 100));
@@ -727,6 +1068,49 @@ mod tests {
     }
 
     #[test]
+    fn feature_claims_lower_through_csg_tree_branches() {
+        let fixture = ragnarok_column_fixture();
+        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
+        let lowering =
+            lower_feature_claims_to_csg_tree(&cut.emitted_claims, ClaimLoweringTarget::Render);
+        assert!(lowering.root.is_some());
+        assert!(lowering.arena.brush_count() > 0);
+        assert!(lowering.arena.branch_count() > 0);
+    }
+
+    #[test]
+    fn selected_cut_chunks_emit_per_selected_domain() {
+        let fixture = ragnarok_column_fixture();
+        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
+        let chunks = lower_selected_cut_chunks(&cut);
+        assert_eq!(chunks.len(), cut.selected_nodes.len());
+        for chunk in chunks {
+            assert_eq!(chunk.source_domain_keys.len(), 1);
+            assert!(cut.selected_nodes.contains(&chunk.source_domain_keys[0]));
+            assert!(chunk.mesh.triangle_count() > 0);
+        }
+    }
+
+    #[test]
+    fn requested_chunk_bypasses_frustum_and_budget() {
+        let fixture = ragnarok_column_fixture();
+        let requested = fixture.children[0].children[2].children[0].children[1]
+            .key
+            .clone();
+        let mut request = query(0.01, 1);
+        request.frustum =
+            Aabb::from_center_size(Vec3::new(10_000.0, 10_000.0, 10_000.0), Vec3::splat(1.0));
+        request.requested_chunk_keys.push(requested.clone());
+        let cut = select_domain_cut(&fixture, &request);
+        assert_eq!(cut.selected_nodes, vec![requested.clone()]);
+        assert!(
+            cut.diagnostics
+                .iter()
+                .any(|row| row.domain_key == requested && row.requested)
+        );
+    }
+
+    #[test]
     fn ragnarok_fixture_emits_lod_chunks_and_preserves_parent_for_transition() {
         let fixture = ragnarok_column_fixture();
         let tight_cut = select_domain_cut(&fixture, &query(10_000.0, 100));
@@ -738,9 +1122,16 @@ mod tests {
         assert!(tight.mesh.triangle_count() > 0);
         assert!(medium.mesh.triangle_count() > tight.mesh.triangle_count());
         assert!(relaxed.mesh.triangle_count() > medium.mesh.triangle_count());
-        assert_eq!(medium_cut.selected_nodes.len(), 3);
+        assert!(medium_cut.selected_nodes.len() > tight_cut.selected_nodes.len());
+        assert!(relaxed_cut.selected_nodes.len() > medium_cut.selected_nodes.len());
         assert!(!tight_cut.fallback_nodes.is_empty());
         assert!(!relaxed_cut.selected_nodes.is_empty());
+        assert!(
+            relaxed_cut
+                .selected_nodes
+                .iter()
+                .any(|key| key.0.contains("/chunk-"))
+        );
     }
 
     #[test]
