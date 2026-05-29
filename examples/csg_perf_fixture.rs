@@ -337,11 +337,14 @@ fn ragnarok_lod_query(target_error: f32, triangle_budget: usize) -> DomainQuery 
     DomainQuery {
         camera_position: Vec3::new(36.0, -42.0, 30.0),
         frustum: Aabb::from_center_size(Vec3::new(0.0, 0.0, 45.0), Vec3::splat(150.0)),
+        viewport_height_px: 1080.0,
+        vertical_fov_radians: std::f32::consts::FRAC_PI_3,
         target_error,
         triangle_budget,
         collider_budget: triangle_budget,
         semantic_filter: Vec::new(),
         requested_chunk_keys: Vec::new(),
+        dirty_domain_keys: Vec::new(),
     }
 }
 

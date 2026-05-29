@@ -525,11 +525,14 @@ impl DomainNode {
 pub struct DomainQuery {
     pub camera_position: Vec3,
     pub frustum: Aabb,
+    pub viewport_height_px: f32,
+    pub vertical_fov_radians: f32,
     pub target_error: f32,
     pub triangle_budget: usize,
     pub collider_budget: usize,
     pub semantic_filter: Vec<DomainKind>,
     pub requested_chunk_keys: Vec<DomainKey>,
+    pub dirty_domain_keys: Vec<DomainKey>,
 }
 
 impl DomainQuery {
@@ -543,10 +546,13 @@ pub struct ContributionRow {
     pub domain_key: DomainKey,
     pub kind: DomainKind,
     pub contribution: f32,
+    pub projected_screen_error: f32,
+    pub semantic_priority: f32,
     pub estimated_triangle_cost: usize,
     pub child_cost: usize,
     pub remaining_triangle_budget: usize,
     pub requested: bool,
+    pub dirty: bool,
     pub selected: bool,
     pub used_fallback: bool,
     pub deferred_by_budget: bool,
@@ -1103,10 +1109,23 @@ fn domain_priority(kind: DomainKind) -> f32 {
 }
 
 fn contribution(node: &DomainNode, query: &DomainQuery) -> f32 {
+    let projected_error = projected_screen_error(node, query);
+    let stale_multiplier = if query.dirty_domain_keys.contains(&node.key) {
+        1.5
+    } else {
+        1.0
+    };
+    let cost_pressure = selection_triangle_cost(node).max(1) as f32;
+    (projected_error * domain_priority(node.kind) * stale_multiplier) / cost_pressure.sqrt()
+}
+
+fn projected_screen_error(node: &DomainNode, query: &DomainQuery) -> f32 {
     let center = node.summary.bounds.center();
     let distance = center.distance(query.camera_position).max(1.0);
     let radius = node.summary.bounds.size().length() * 0.5;
-    (radius / distance) * node.summary.contribution_weight
+    let focal_pixels = query.viewport_height_px.max(1.0)
+        / (2.0 * (query.vertical_fov_radians.max(0.01) * 0.5).tan());
+    (radius / distance) * focal_pixels
 }
 
 fn stable_cut_id(keys: &[DomainKey]) -> String {
@@ -1147,14 +1166,19 @@ impl CutState<'_> {
     fn visit(&mut self, node: &DomainNode, force_visit: bool) {
         let requested_self = self.query.requested_chunk_keys.contains(&node.key);
         let requested_descendant = has_requested_descendant(node, &self.query.requested_chunk_keys);
+        let dirty_descendant = has_requested_descendant(node, &self.query.dirty_domain_keys);
         if !force_visit
             && !requested_self
             && !requested_descendant
+            && !dirty_descendant
             && !node.summary.bounds.intersects(self.query.frustum)
         {
             return;
         }
         let score = contribution(node, self.query);
+        let projected_error = projected_screen_error(node, self.query);
+        let semantic_priority = domain_priority(node.kind);
+        let dirty = self.query.dirty_domain_keys.contains(&node.key);
         let child_cost = node
             .children
             .iter()
@@ -1169,17 +1193,21 @@ impl CutState<'_> {
             && child_collider_cost <= self.remaining_colliders;
         let descend_for_detail = score >= self.query.target_error && budget_allows_children;
         let descend_for_request = requested_descendant && !requested_self;
+        let descend_for_dirty = dirty_descendant && budget_allows_children;
         let should_descend = node.summary.has_children
             && !requested_self
-            && (descend_for_request || descend_for_detail);
+            && (descend_for_request || descend_for_dirty || descend_for_detail);
         self.diagnostics.push(ContributionRow {
             domain_key: node.key.clone(),
             kind: node.kind,
             contribution: score,
+            projected_screen_error: projected_error,
+            semantic_priority,
             estimated_triangle_cost: node.summary.estimated_triangle_cost,
             child_cost,
             remaining_triangle_budget: self.remaining_triangles,
             requested: requested_self,
+            dirty,
             selected: !should_descend && self.query.accepts_kind(node.kind),
             used_fallback: !should_descend && node.summary.has_children,
             deferred_by_budget: node.summary.has_children
@@ -1197,7 +1225,9 @@ impl CutState<'_> {
             for child in &node.children {
                 let child_requested = self.query.requested_chunk_keys.contains(&child.key)
                     || has_requested_descendant(child, &self.query.requested_chunk_keys);
-                self.visit(child, child_requested);
+                let child_dirty = self.query.dirty_domain_keys.contains(&child.key)
+                    || has_requested_descendant(child, &self.query.dirty_domain_keys);
+                self.visit(child, child_requested || child_dirty);
             }
             return;
         }
@@ -1255,11 +1285,14 @@ mod tests {
         DomainQuery {
             camera_position: Vec3::new(36.0, -42.0, 30.0),
             frustum: Aabb::from_center_size(Vec3::new(0.0, 0.0, 45.0), Vec3::splat(150.0)),
+            viewport_height_px: 1080.0,
+            vertical_fov_radians: std::f32::consts::FRAC_PI_3,
             target_error,
             triangle_budget,
             collider_budget: triangle_budget,
             semantic_filter: Vec::new(),
             requested_chunk_keys: Vec::new(),
+            dirty_domain_keys: Vec::new(),
         }
     }
 
@@ -1358,6 +1391,40 @@ mod tests {
         let cut = select_domain_cut(&fixture, &collider_tight);
         assert_eq!(cut.selected_nodes, vec![fixture.key.clone()]);
         assert!(cut.diagnostics[0].deferred_by_budget);
+    }
+
+    #[test]
+    fn selected_cut_reports_projected_error_and_dirty_pressure() {
+        let fixture = ragnarok_column_fixture();
+        let dirty_key = fixture.key.clone();
+        let mut request = query(10_000.0, 100);
+        request.dirty_domain_keys.push(dirty_key.clone());
+        let cut = select_domain_cut(&fixture, &request);
+        let row = cut
+            .diagnostics
+            .iter()
+            .find(|row| row.domain_key == dirty_key)
+            .unwrap();
+        assert!(row.projected_screen_error > 0.0);
+        assert_eq!(row.semantic_priority, domain_priority(row.kind));
+        assert!(row.dirty);
+    }
+
+    #[test]
+    fn dirty_descendant_pulls_selection_down_when_budget_allows() {
+        let fixture = ragnarok_column_fixture();
+        let dirty_key = fixture.children[0].children[0].children[0].children[0]
+            .key
+            .clone();
+        let mut request = query(10_000.0, 10_000);
+        request.dirty_domain_keys.push(dirty_key.clone());
+        let cut = select_domain_cut(&fixture, &request);
+        assert!(cut.selected_nodes.contains(&dirty_key));
+        assert!(
+            cut.diagnostics
+                .iter()
+                .any(|row| row.domain_key == dirty_key && row.dirty)
+        );
     }
 
     #[test]
