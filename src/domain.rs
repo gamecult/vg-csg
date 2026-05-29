@@ -307,6 +307,10 @@ impl DomainBuildRequestDocument {
     pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(source)
     }
+
+    pub fn stable_key(&self) -> Result<String, serde_json::Error> {
+        stable_document_key("domain-build-request", self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -729,6 +733,10 @@ impl TriangleChunkDocument {
     pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(source)
     }
+
+    pub fn stable_key(&self) -> Result<String, serde_json::Error> {
+        stable_document_key("triangle-chunk", self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -784,6 +792,12 @@ impl SelectedCut {
                 .collect(),
             chunks: chunks.iter().map(TriangleChunk::manifest).collect(),
         }
+    }
+}
+
+impl SelectedCutManifest {
+    pub fn stable_key(&self) -> Result<String, serde_json::Error> {
+        stable_document_key("selected-cut", self)
     }
 }
 
@@ -1364,6 +1378,14 @@ fn stable_str_hash(value: &str) -> u64 {
     stable_hash_bytes(FNV_OFFSET_BASIS, value.as_bytes())
 }
 
+fn stable_document_key(
+    prefix: &str,
+    document: &impl Serialize,
+) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_string(document)?;
+    Ok(format!("{prefix}-{:016x}", stable_str_hash(&json)))
+}
+
 fn stable_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -1802,6 +1824,34 @@ mod tests {
         );
         assert!(!build.chunks.is_empty());
         assert_eq!(build.manifest.chunks.len(), build.chunks.len());
+    }
+
+    #[test]
+    fn transport_documents_have_stable_cache_keys() {
+        let request = DomainBuildRequestDocument {
+            schema_version: DomainBuildRequestDocument::CURRENT_SCHEMA_VERSION,
+            domain: DomainSpecDocument::from_spec(&ragnarok_column_spec()),
+            query: DomainQueryDocument::from_query(&query(0.01, 10_000)),
+        };
+        let build = request.build();
+        let chunk_document = TriangleChunkDocument::from_chunk(&build.chunks[0]);
+        let mut changed = request.clone();
+        changed.query.triangle_budget += 1;
+        assert_eq!(request.stable_key().unwrap(), request.stable_key().unwrap());
+        assert_ne!(request.stable_key().unwrap(), changed.stable_key().unwrap());
+        assert!(
+            build
+                .manifest
+                .stable_key()
+                .unwrap()
+                .starts_with("selected-cut-")
+        );
+        assert!(
+            chunk_document
+                .stable_key()
+                .unwrap()
+                .starts_with("triangle-chunk-")
+        );
     }
 
     #[test]
