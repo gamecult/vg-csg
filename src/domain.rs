@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Aabb, BrushOp, BuildReport, CsgBranchOp, CsgNodeId, CsgOperationType, CsgTreeArena, MaterialId,
-    Primitive, TriangleMesh,
+    Primitive, TriangleMesh, TriangleMeshDocument,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -595,6 +595,110 @@ pub struct TriangleChunkManifest {
     pub candidate_pairs: usize,
     pub rejected_pairs: usize,
     pub transition_hint: ChunkTransitionHint,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TriangleChunkDocument {
+    pub manifest: TriangleChunkManifest,
+    pub mesh: TriangleMeshDocument,
+    pub collider_mesh: Option<TriangleMeshDocument>,
+}
+
+impl TriangleChunkDocument {
+    pub fn from_chunk(chunk: &TriangleChunk) -> Self {
+        Self {
+            manifest: chunk.manifest(),
+            mesh: TriangleMeshDocument::from_mesh(&chunk.mesh),
+            collider_mesh: chunk
+                .collider_mesh
+                .as_ref()
+                .map(TriangleMeshDocument::from_mesh),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(source)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SelectedCutManifest {
+    pub id: String,
+    pub selected_nodes: Vec<String>,
+    pub deferred_child_requests: Vec<String>,
+    pub parent_fallback_nodes: Vec<String>,
+    pub diagnostics: Vec<ContributionManifest>,
+    pub chunks: Vec<TriangleChunkManifest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContributionManifest {
+    pub domain_key: String,
+    pub kind: DomainKind,
+    pub contribution: f32,
+    pub projected_screen_error: f32,
+    pub semantic_priority: f32,
+    pub estimated_triangle_cost: usize,
+    pub child_cost: usize,
+    pub remaining_triangle_budget: usize,
+    pub requested: bool,
+    pub dirty: bool,
+    pub selected: bool,
+    pub used_fallback: bool,
+    pub deferred_by_budget: bool,
+}
+
+impl SelectedCut {
+    pub fn manifest(&self, chunks: &[TriangleChunk]) -> SelectedCutManifest {
+        SelectedCutManifest {
+            id: self.id.clone(),
+            selected_nodes: self
+                .selected_nodes
+                .iter()
+                .map(|key| key.0.clone())
+                .collect(),
+            deferred_child_requests: self
+                .deferred_children
+                .iter()
+                .map(|key| key.0.clone())
+                .collect(),
+            parent_fallback_nodes: self
+                .fallback_nodes
+                .iter()
+                .map(|key| key.0.clone())
+                .collect(),
+            diagnostics: self
+                .diagnostics
+                .iter()
+                .map(ContributionManifest::from_row)
+                .collect(),
+            chunks: chunks.iter().map(TriangleChunk::manifest).collect(),
+        }
+    }
+}
+
+impl ContributionManifest {
+    pub fn from_row(row: &ContributionRow) -> Self {
+        Self {
+            domain_key: row.domain_key.0.clone(),
+            kind: row.kind,
+            contribution: row.contribution,
+            projected_screen_error: row.projected_screen_error,
+            semantic_priority: row.semantic_priority,
+            estimated_triangle_cost: row.estimated_triangle_cost,
+            child_cost: row.child_cost,
+            remaining_triangle_budget: row.remaining_triangle_budget,
+            requested: row.requested,
+            dirty: row.dirty,
+            selected: row.selected,
+            used_fallback: row.used_fallback,
+            deferred_by_budget: row.deferred_by_budget,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1519,6 +1623,35 @@ mod tests {
         assert!(!manifest.source_domain_keys.is_empty());
         assert!(manifest.transition_hint.supports_parent_child_coexistence);
         assert_ne!(manifest.transition_hint.stable_clip_seed, 0);
+    }
+
+    #[test]
+    fn triangle_chunk_document_round_trips_transport_mesh() {
+        let fixture = ragnarok_column_fixture();
+        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
+        let chunks = lower_selected_cut_chunks(&cut);
+        let document = TriangleChunkDocument::from_chunk(&chunks[0]);
+        let json = document.to_json().unwrap();
+        let decoded = TriangleChunkDocument::from_json(&json).unwrap();
+        let mesh = decoded.mesh.to_mesh();
+        assert_eq!(decoded.manifest.key, chunks[0].key.0);
+        assert_eq!(mesh.indices, chunks[0].mesh.indices);
+        assert_eq!(
+            decoded.collider_mesh.unwrap().to_mesh().triangle_count(),
+            chunks[0].collider_mesh.as_ref().unwrap().triangle_count()
+        );
+    }
+
+    #[test]
+    fn selected_cut_manifest_carries_worker_artifact_context() {
+        let fixture = ragnarok_column_fixture();
+        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
+        let chunks = lower_selected_cut_chunks(&cut);
+        let manifest = cut.manifest(&chunks);
+        assert_eq!(manifest.id, cut.id);
+        assert_eq!(manifest.chunks.len(), chunks.len());
+        assert_eq!(manifest.selected_nodes.len(), cut.selected_nodes.len());
+        assert!(!manifest.diagnostics.is_empty());
     }
 
     #[test]
