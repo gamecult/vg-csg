@@ -1,4 +1,5 @@
 use bevy_math::{Quat, Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Aabb, BrushOp, BuildReport, CsgBranchOp, CsgNodeId, CsgOperationType, CsgTreeArena, MaterialId,
@@ -66,7 +67,7 @@ impl DomainFrame {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainKind {
     Root,
     Column,
@@ -79,14 +80,14 @@ pub enum DomainKind {
     Chunk,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FieldLayer {
     Form,
     Appearance,
     Transport,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FieldEncoding {
     Mesh,
     Sdf3d,
@@ -95,7 +96,7 @@ pub enum FieldEncoding {
     Confidence,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatureClaimKind {
     SolidBrush,
     VoidBrush,
@@ -105,7 +106,7 @@ pub enum FeatureClaimKind {
     ColliderProxy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatureLoweringPolicy {
     RenderOnly,
     ColliderOnly,
@@ -279,6 +280,138 @@ pub struct DomainNodeSpec {
     pub children: Vec<DomainNodeSpec>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DomainSpecDocument {
+    pub schema_version: u32,
+    pub root: DomainNodeDocument,
+}
+
+impl DomainSpecDocument {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+    pub fn from_spec(spec: &DomainNodeSpec) -> Self {
+        Self {
+            schema_version: Self::CURRENT_SCHEMA_VERSION,
+            root: DomainNodeDocument::from_spec(spec),
+        }
+    }
+
+    pub fn to_spec(&self) -> DomainNodeSpec {
+        self.root.to_spec()
+    }
+
+    pub fn compile_root(&self) -> DomainNode {
+        self.to_spec().compile_root()
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(source)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DomainNodeDocument {
+    pub name: String,
+    pub kind: DomainKind,
+    pub translation: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub seed: u64,
+    pub claims: Vec<FeatureClaimDocument>,
+    pub children: Vec<DomainNodeDocument>,
+}
+
+impl DomainNodeDocument {
+    pub fn from_spec(spec: &DomainNodeSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            kind: spec.kind,
+            translation: vec3_to_array(spec.frame.translation),
+            rotation_xyzw: quat_to_array(spec.frame.rotation),
+            seed: spec.seed,
+            claims: spec
+                .claims
+                .iter()
+                .map(FeatureClaimDocument::from_spec)
+                .collect(),
+            children: spec
+                .children
+                .iter()
+                .map(DomainNodeDocument::from_spec)
+                .collect(),
+        }
+    }
+
+    pub fn to_spec(&self) -> DomainNodeSpec {
+        DomainNodeSpec {
+            name: self.name.clone(),
+            kind: self.kind,
+            frame: DomainFrame {
+                translation: array_to_vec3(self.translation),
+                rotation: array_to_quat(self.rotation_xyzw),
+            },
+            seed: self.seed,
+            claims: self
+                .claims
+                .iter()
+                .map(FeatureClaimDocument::to_spec)
+                .collect(),
+            children: self
+                .children
+                .iter()
+                .map(DomainNodeDocument::to_spec)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureClaimDocument {
+    pub name: String,
+    pub translation: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub support_center: [f32; 3],
+    pub support_size: [f32; 3],
+    pub kind: FeatureClaimKind,
+    pub material: u32,
+    pub lowering: FeatureLoweringPolicy,
+}
+
+impl FeatureClaimDocument {
+    pub fn from_spec(spec: &FeatureClaimSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            translation: vec3_to_array(spec.frame.translation),
+            rotation_xyzw: quat_to_array(spec.frame.rotation),
+            support_center: vec3_to_array(spec.support.center()),
+            support_size: vec3_to_array(spec.support.size()),
+            kind: spec.kind,
+            material: spec.material.0,
+            lowering: spec.lowering,
+        }
+    }
+
+    pub fn to_spec(&self) -> FeatureClaimSpec {
+        FeatureClaimSpec {
+            name: self.name.clone(),
+            frame: DomainFrame {
+                translation: array_to_vec3(self.translation),
+                rotation: array_to_quat(self.rotation_xyzw),
+            },
+            support: Aabb::from_center_size(
+                array_to_vec3(self.support_center),
+                array_to_vec3(self.support_size),
+            ),
+            kind: self.kind,
+            material: MaterialId(self.material),
+            lowering: self.lowering,
+        }
+    }
+}
+
 impl DomainNodeSpec {
     pub fn new(name: impl Into<String>, kind: DomainKind, frame: DomainFrame, seed: u64) -> Self {
         Self {
@@ -439,6 +572,59 @@ pub struct TriangleChunk {
     pub source_domain_keys: Vec<DomainKey>,
     pub source_claim_keys: Vec<String>,
     pub report: BuildReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TriangleChunkManifest {
+    pub key: String,
+    pub selected_cut_id: String,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub render_vertices: usize,
+    pub render_triangles: usize,
+    pub collider_triangles: usize,
+    pub source_domain_keys: Vec<String>,
+    pub source_claim_keys: Vec<String>,
+    pub input_brushes: usize,
+    pub candidate_pairs: usize,
+    pub rejected_pairs: usize,
+    pub transition_hint: ChunkTransitionHint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkTransitionHint {
+    pub stable_clip_seed: u64,
+    pub supports_parent_child_coexistence: bool,
+}
+
+impl TriangleChunk {
+    pub fn manifest(&self) -> TriangleChunkManifest {
+        TriangleChunkManifest {
+            key: self.key.0.clone(),
+            selected_cut_id: self.selected_cut_id.clone(),
+            bounds_min: vec3_to_array(self.bounds.min),
+            bounds_max: vec3_to_array(self.bounds.max),
+            render_vertices: self.mesh.vertex_count(),
+            render_triangles: self.mesh.triangle_count(),
+            collider_triangles: self
+                .collider_mesh
+                .as_ref()
+                .map_or(0, TriangleMesh::triangle_count),
+            source_domain_keys: self
+                .source_domain_keys
+                .iter()
+                .map(|key| key.0.clone())
+                .collect(),
+            source_claim_keys: self.source_claim_keys.clone(),
+            input_brushes: self.report.input_brushes,
+            candidate_pairs: self.report.candidate_pairs,
+            rejected_pairs: self.report.rejected_pairs,
+            transition_hint: ChunkTransitionHint {
+                stable_clip_seed: stable_str_hash(&self.key.0),
+                supports_parent_child_coexistence: true,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -861,6 +1047,22 @@ fn claim_spec(
     FeatureClaimSpec::new(name, frame, support, kind, material)
 }
 
+fn vec3_to_array(value: Vec3) -> [f32; 3] {
+    [value.x, value.y, value.z]
+}
+
+fn array_to_vec3(value: [f32; 3]) -> Vec3 {
+    Vec3::new(value[0], value[1], value[2])
+}
+
+fn quat_to_array(value: Quat) -> [f32; 4] {
+    [value.x, value.y, value.z, value.w]
+}
+
+fn array_to_quat(value: [f32; 4]) -> Quat {
+    Quat::from_xyzw(value[0], value[1], value[2], value[3])
+}
+
 fn fallback_box_claim(
     key: &DomainKey,
     kind: DomainKind,
@@ -908,14 +1110,26 @@ fn contribution(node: &DomainNode, query: &DomainQuery) -> f32 {
 }
 
 fn stable_cut_id(keys: &[DomainKey]) -> String {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut hash = FNV_OFFSET_BASIS;
     for key in keys {
-        for byte in key.0.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x1000_0000_01b3);
-        }
+        hash = stable_hash_bytes(hash, key.0.as_bytes());
     }
     format!("cut-{hash:016x}")
+}
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x1000_0000_01b3;
+
+fn stable_str_hash(value: &str) -> u64 {
+    stable_hash_bytes(FNV_OFFSET_BASIS, value.as_bytes())
+}
+
+fn stable_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 struct CutState<'a> {
@@ -1083,6 +1297,26 @@ mod tests {
     }
 
     #[test]
+    fn domain_spec_document_round_trips_ragnarok_fixture() {
+        let spec = ragnarok_column_spec();
+        let document = DomainSpecDocument::from_spec(&spec);
+        let json = document.to_json_pretty().unwrap();
+        let decoded = DomainSpecDocument::from_json(&json).unwrap();
+        let original = spec.compile_root();
+        let round_trip = decoded.compile_root();
+        assert_eq!(
+            decoded.schema_version,
+            DomainSpecDocument::CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(original.key, round_trip.key);
+        assert_eq!(
+            original.children[0].children[1].children[2].children[0].claims[0].key,
+            round_trip.children[0].children[1].children[2].children[0].claims[0].key
+        );
+        assert!(json.contains("\"RoadSurfaceSlab\""));
+    }
+
+    #[test]
     fn domain_summary_contains_child_bounds() {
         let fixture = ragnarok_column_fixture();
         let column = &fixture.children[0];
@@ -1205,6 +1439,19 @@ mod tests {
             assert!(cut.selected_nodes.contains(&chunk.source_domain_keys[0]));
             assert!(chunk.mesh.triangle_count() > 0);
         }
+    }
+
+    #[test]
+    fn triangle_chunk_manifest_preserves_streaming_metadata() {
+        let fixture = ragnarok_column_fixture();
+        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
+        let chunks = lower_selected_cut_chunks(&cut);
+        let manifest = chunks[0].manifest();
+        assert_eq!(manifest.selected_cut_id, cut.id);
+        assert!(manifest.render_triangles > 0);
+        assert!(!manifest.source_domain_keys.is_empty());
+        assert!(manifest.transition_hint.supports_parent_child_coexistence);
+        assert_ne!(manifest.transition_hint.stable_clip_seed, 0);
     }
 
     #[test]
