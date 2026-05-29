@@ -1,5 +1,4 @@
 use bevy_math::{Vec2, Vec3};
-use serde::{Deserialize, Serialize};
 
 use crate::{Aabb, MaterialId};
 
@@ -99,65 +98,5 @@ impl TriangleMesh {
         self.uvs.extend(uvs);
         self.indices.extend([base, base + 1, base + 2]);
         self.triangle_materials.push(material);
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct TriangleMeshDocument {
-    pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
-    pub uvs: Vec<[f32; 2]>,
-    pub indices: Vec<u32>,
-    pub triangle_materials: Vec<u32>,
-}
-
-impl TriangleMeshDocument {
-    pub fn from_mesh(mesh: &TriangleMesh) -> Self {
-        Self {
-            positions: mesh
-                .positions
-                .iter()
-                .map(|value| [value.x, value.y, value.z])
-                .collect(),
-            normals: mesh
-                .normals
-                .iter()
-                .map(|value| [value.x, value.y, value.z])
-                .collect(),
-            uvs: mesh.uvs.iter().map(|value| [value.x, value.y]).collect(),
-            indices: mesh.indices.clone(),
-            triangle_materials: mesh
-                .triangle_materials
-                .iter()
-                .map(|material| material.0)
-                .collect(),
-        }
-    }
-
-    pub fn to_mesh(&self) -> TriangleMesh {
-        TriangleMesh {
-            positions: self
-                .positions
-                .iter()
-                .map(|value| Vec3::new(value[0], value[1], value[2]))
-                .collect(),
-            normals: self
-                .normals
-                .iter()
-                .map(|value| Vec3::new(value[0], value[1], value[2]))
-                .collect(),
-            uvs: self
-                .uvs
-                .iter()
-                .map(|value| Vec2::new(value[0], value[1]))
-                .collect(),
-            indices: self.indices.clone(),
-            triangle_materials: self
-                .triangle_materials
-                .iter()
-                .copied()
-                .map(MaterialId)
-                .collect(),
-        }
     }
 }

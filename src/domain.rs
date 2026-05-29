@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Aabb, BrushOp, BuildReport, CsgBranchOp, CsgNodeId, CsgOperationType, CsgTreeArena, MaterialId,
-    Primitive, TriangleMesh, TriangleMeshDocument,
+    Primitive, TriangleMesh,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -286,100 +286,6 @@ pub struct DomainSpecDocument {
     pub root: DomainNodeDocument,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DomainBuildRequestDocument {
-    pub schema_version: u32,
-    pub domain: DomainSpecDocument,
-    pub query: DomainQueryDocument,
-}
-
-impl DomainBuildRequestDocument {
-    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-
-    pub fn build(&self) -> DomainChunkBuild {
-        build_domain_chunks(&self.domain.compile_root(), &self.query.to_query())
-    }
-
-    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-
-    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(source)
-    }
-
-    pub fn stable_key(&self) -> Result<String, serde_json::Error> {
-        stable_document_key("domain-build-request", self)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DomainQueryDocument {
-    pub camera_position: [f32; 3],
-    pub frustum_min: [f32; 3],
-    pub frustum_max: [f32; 3],
-    pub viewport_height_px: f32,
-    pub vertical_fov_radians: f32,
-    pub target_error: f32,
-    pub triangle_budget: usize,
-    pub collider_budget: usize,
-    pub semantic_filter: Vec<DomainKind>,
-    pub requested_chunk_keys: Vec<String>,
-    pub dirty_domain_keys: Vec<String>,
-}
-
-impl DomainQueryDocument {
-    pub fn from_query(query: &DomainQuery) -> Self {
-        Self {
-            camera_position: vec3_to_array(query.camera_position),
-            frustum_min: vec3_to_array(query.frustum.min),
-            frustum_max: vec3_to_array(query.frustum.max),
-            viewport_height_px: query.viewport_height_px,
-            vertical_fov_radians: query.vertical_fov_radians,
-            target_error: query.target_error,
-            triangle_budget: query.triangle_budget,
-            collider_budget: query.collider_budget,
-            semantic_filter: query.semantic_filter.clone(),
-            requested_chunk_keys: query
-                .requested_chunk_keys
-                .iter()
-                .map(|key| key.0.clone())
-                .collect(),
-            dirty_domain_keys: query
-                .dirty_domain_keys
-                .iter()
-                .map(|key| key.0.clone())
-                .collect(),
-        }
-    }
-
-    pub fn to_query(&self) -> DomainQuery {
-        DomainQuery {
-            camera_position: array_to_vec3(self.camera_position),
-            frustum: Aabb::new(
-                array_to_vec3(self.frustum_min),
-                array_to_vec3(self.frustum_max),
-            ),
-            viewport_height_px: self.viewport_height_px,
-            vertical_fov_radians: self.vertical_fov_radians,
-            target_error: self.target_error,
-            triangle_budget: self.triangle_budget,
-            collider_budget: self.collider_budget,
-            semantic_filter: self.semantic_filter.clone(),
-            requested_chunk_keys: self
-                .requested_chunk_keys
-                .iter()
-                .map(|key| DomainKey::new(key.clone()))
-                .collect(),
-            dirty_domain_keys: self
-                .dirty_domain_keys
-                .iter()
-                .map(|key| DomainKey::new(key.clone()))
-                .collect(),
-        }
-    }
-}
-
 impl DomainSpecDocument {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -396,14 +302,6 @@ impl DomainSpecDocument {
 
     pub fn compile_root(&self) -> DomainNode {
         self.to_spec().compile_root()
-    }
-
-    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-
-    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(source)
     }
 }
 
@@ -669,14 +567,7 @@ pub struct DomainChunkBuild {
     pub manifest: SelectedCutManifest,
 }
 
-impl DomainChunkBuild {
-    pub fn chunk_documents(&self) -> Vec<TriangleChunkDocument> {
-        self.chunks
-            .iter()
-            .map(TriangleChunkDocument::from_chunk)
-            .collect()
-    }
-}
+impl DomainChunkBuild {}
 
 #[derive(Clone, Debug)]
 pub struct TriangleChunk {
@@ -705,38 +596,6 @@ pub struct TriangleChunkManifest {
     pub candidate_pairs: usize,
     pub rejected_pairs: usize,
     pub transition_hint: ChunkTransitionHint,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TriangleChunkDocument {
-    pub manifest: TriangleChunkManifest,
-    pub mesh: TriangleMeshDocument,
-    pub collider_mesh: Option<TriangleMeshDocument>,
-}
-
-impl TriangleChunkDocument {
-    pub fn from_chunk(chunk: &TriangleChunk) -> Self {
-        Self {
-            manifest: chunk.manifest(),
-            mesh: TriangleMeshDocument::from_mesh(&chunk.mesh),
-            collider_mesh: chunk
-                .collider_mesh
-                .as_ref()
-                .map(TriangleMeshDocument::from_mesh),
-        }
-    }
-
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-
-    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(source)
-    }
-
-    pub fn stable_key(&self) -> Result<String, serde_json::Error> {
-        stable_document_key("triangle-chunk", self)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -792,12 +651,6 @@ impl SelectedCut {
                 .collect(),
             chunks: chunks.iter().map(TriangleChunk::manifest).collect(),
         }
-    }
-}
-
-impl SelectedCutManifest {
-    pub fn stable_key(&self) -> Result<String, serde_json::Error> {
-        stable_document_key("selected-cut", self)
     }
 }
 
@@ -1378,14 +1231,6 @@ fn stable_str_hash(value: &str) -> u64 {
     stable_hash_bytes(FNV_OFFSET_BASIS, value.as_bytes())
 }
 
-fn stable_document_key(
-    prefix: &str,
-    document: &impl Serialize,
-) -> Result<String, serde_json::Error> {
-    let json = serde_json::to_string(document)?;
-    Ok(format!("{prefix}-{:016x}", stable_str_hash(&json)))
-}
-
 fn stable_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -1576,12 +1421,10 @@ mod tests {
     fn domain_spec_document_round_trips_ragnarok_fixture() {
         let spec = ragnarok_column_spec();
         let document = DomainSpecDocument::from_spec(&spec);
-        let json = document.to_json_pretty().unwrap();
-        let decoded = DomainSpecDocument::from_json(&json).unwrap();
         let original = spec.compile_root();
-        let round_trip = decoded.compile_root();
+        let round_trip = document.compile_root();
         assert_eq!(
-            decoded.schema_version,
+            document.schema_version,
             DomainSpecDocument::CURRENT_SCHEMA_VERSION
         );
         assert_eq!(original.key, round_trip.key);
@@ -1589,7 +1432,6 @@ mod tests {
             original.children[0].children[1].children[2].children[0].claims[0].key,
             round_trip.children[0].children[1].children[2].children[0].claims[0].key
         );
-        assert!(json.contains("\"RoadSurfaceSlab\""));
     }
 
     #[test]
@@ -1765,23 +1607,6 @@ mod tests {
     }
 
     #[test]
-    fn triangle_chunk_document_round_trips_transport_mesh() {
-        let fixture = ragnarok_column_fixture();
-        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
-        let chunks = lower_selected_cut_chunks(&cut);
-        let document = TriangleChunkDocument::from_chunk(&chunks[0]);
-        let json = document.to_json().unwrap();
-        let decoded = TriangleChunkDocument::from_json(&json).unwrap();
-        let mesh = decoded.mesh.to_mesh();
-        assert_eq!(decoded.manifest.key, chunks[0].key.0);
-        assert_eq!(mesh.indices, chunks[0].mesh.indices);
-        assert_eq!(
-            decoded.collider_mesh.unwrap().to_mesh().triangle_count(),
-            chunks[0].collider_mesh.as_ref().unwrap().triangle_count()
-        );
-    }
-
-    #[test]
     fn selected_cut_manifest_carries_worker_artifact_context() {
         let fixture = ragnarok_column_fixture();
         let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
@@ -1797,60 +1622,14 @@ mod tests {
     fn build_domain_chunks_runs_full_runtime_pipeline() {
         let fixture = ragnarok_column_fixture();
         let build = build_domain_chunks(&fixture, &query(0.01, 10_000));
-        let documents = build.chunk_documents();
         assert_eq!(build.manifest.id, build.cut.id);
         assert_eq!(build.manifest.chunks.len(), build.chunks.len());
-        assert_eq!(documents.len(), build.chunks.len());
-        assert!(
-            documents
-                .iter()
-                .all(|document| !document.mesh.indices.is_empty())
-        );
-    }
-
-    #[test]
-    fn domain_build_request_document_round_trips_worker_input() {
-        let request = DomainBuildRequestDocument {
-            schema_version: DomainBuildRequestDocument::CURRENT_SCHEMA_VERSION,
-            domain: DomainSpecDocument::from_spec(&ragnarok_column_spec()),
-            query: DomainQueryDocument::from_query(&query(0.01, 10_000)),
-        };
-        let json = request.to_json_pretty().unwrap();
-        let decoded = DomainBuildRequestDocument::from_json(&json).unwrap();
-        let build = decoded.build();
-        assert_eq!(
-            decoded.schema_version,
-            DomainBuildRequestDocument::CURRENT_SCHEMA_VERSION
-        );
         assert!(!build.chunks.is_empty());
-        assert_eq!(build.manifest.chunks.len(), build.chunks.len());
-    }
-
-    #[test]
-    fn transport_documents_have_stable_cache_keys() {
-        let request = DomainBuildRequestDocument {
-            schema_version: DomainBuildRequestDocument::CURRENT_SCHEMA_VERSION,
-            domain: DomainSpecDocument::from_spec(&ragnarok_column_spec()),
-            query: DomainQueryDocument::from_query(&query(0.01, 10_000)),
-        };
-        let build = request.build();
-        let chunk_document = TriangleChunkDocument::from_chunk(&build.chunks[0]);
-        let mut changed = request.clone();
-        changed.query.triangle_budget += 1;
-        assert_eq!(request.stable_key().unwrap(), request.stable_key().unwrap());
-        assert_ne!(request.stable_key().unwrap(), changed.stable_key().unwrap());
         assert!(
             build
-                .manifest
-                .stable_key()
-                .unwrap()
-                .starts_with("selected-cut-")
-        );
-        assert!(
-            chunk_document
-                .stable_key()
-                .unwrap()
-                .starts_with("triangle-chunk-")
+                .chunks
+                .iter()
+                .all(|chunk| !chunk.mesh.indices.is_empty())
         );
     }
 

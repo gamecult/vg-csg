@@ -10,6 +10,7 @@
 mod assembler;
 mod brush;
 mod convex;
+mod cult_geometry;
 mod domain;
 mod dsl;
 mod frontier;
@@ -20,19 +21,24 @@ mod tree;
 pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
 pub use convex::{CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane, PolygonRouteScratch};
+pub use cult_geometry::{
+    CultGeometryBuildRequest, CultGeometryChunkArtifact, CultGeometryContributionRow,
+    CultGeometryDomainDocument, CultGeometryDomainNode, CultGeometryFeatureClaim,
+    CultGeometrySelectedCutManifest, CultGeometryTriangleMesh, GEOMETRY_BUILD_REQUEST_SCHEMA,
+    GEOMETRY_CHUNK_ARTIFACT_SCHEMA, GEOMETRY_DOMAIN_SCHEMA, GEOMETRY_SELECTED_CUT_SCHEMA,
+};
 pub use domain::{
-    ClaimLoweringTarget, ContributionManifest, ContributionRow, CsgClaimLowering,
-    DomainBuildRequestDocument, DomainChunkBuild, DomainFrame, DomainKey, DomainKind, DomainNode,
-    DomainNodeDocument, DomainNodeSpec, DomainQuery, DomainQueryDocument, DomainSpecDocument,
-    DomainSummary, FeatureClaim, FeatureClaimDocument, FeatureClaimKind, FeatureClaimSpec,
-    FeatureLoweringPolicy, FieldEncoding, FieldLayer, SelectedCut, SelectedCutManifest,
-    TriangleChunk, TriangleChunkDocument, TriangleChunkManifest, build_domain_chunks,
+    ClaimLoweringTarget, ContributionManifest, ContributionRow, CsgClaimLowering, DomainChunkBuild,
+    DomainFrame, DomainKey, DomainKind, DomainNode, DomainNodeDocument, DomainNodeSpec,
+    DomainQuery, DomainSpecDocument, DomainSummary, FeatureClaim, FeatureClaimDocument,
+    FeatureClaimKind, FeatureClaimSpec, FeatureLoweringPolicy, FieldEncoding, FieldLayer,
+    SelectedCut, SelectedCutManifest, TriangleChunk, TriangleChunkManifest, build_domain_chunks,
     lower_feature_claims_to_csg_tree, lower_selected_cut, lower_selected_cut_chunks,
     ragnarok_column_fixture, ragnarok_column_spec, select_domain_cut,
 };
 pub use dsl::LevelDsl;
 pub use frontier::{DemandFrontier, DemandPair, DirtyDemandFrontier};
-pub use mesh::{TriangleMesh, TriangleMeshDocument};
+pub use mesh::TriangleMesh;
 pub use primitives::{
     DomeCapZSpec, FloretArmSpec, append_cylinder_z, append_dome_cap_z, append_floret_arm,
 };
