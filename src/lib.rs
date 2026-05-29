@@ -21,13 +21,13 @@ pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
 pub use convex::{CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane, PolygonRouteScratch};
 pub use domain::{
-    ClaimLoweringTarget, ContributionManifest, ContributionRow, CsgClaimLowering, DomainFrame,
-    DomainKey, DomainKind, DomainNode, DomainNodeDocument, DomainNodeSpec, DomainQuery,
-    DomainSpecDocument, DomainSummary, FeatureClaim, FeatureClaimDocument, FeatureClaimKind,
-    FeatureClaimSpec, FeatureLoweringPolicy, FieldEncoding, FieldLayer, SelectedCut,
-    SelectedCutManifest, TriangleChunk, TriangleChunkDocument, TriangleChunkManifest,
-    lower_feature_claims_to_csg_tree, lower_selected_cut, lower_selected_cut_chunks,
-    ragnarok_column_fixture, ragnarok_column_spec, select_domain_cut,
+    ClaimLoweringTarget, ContributionManifest, ContributionRow, CsgClaimLowering, DomainChunkBuild,
+    DomainFrame, DomainKey, DomainKind, DomainNode, DomainNodeDocument, DomainNodeSpec,
+    DomainQuery, DomainSpecDocument, DomainSummary, FeatureClaim, FeatureClaimDocument,
+    FeatureClaimKind, FeatureClaimSpec, FeatureLoweringPolicy, FieldEncoding, FieldLayer,
+    SelectedCut, SelectedCutManifest, TriangleChunk, TriangleChunkDocument, TriangleChunkManifest,
+    build_domain_chunks, lower_feature_claims_to_csg_tree, lower_selected_cut,
+    lower_selected_cut_chunks, ragnarok_column_fixture, ragnarok_column_spec, select_domain_cut,
 };
 pub use dsl::LevelDsl;
 pub use frontier::{DemandFrontier, DemandPair, DirtyDemandFrontier};

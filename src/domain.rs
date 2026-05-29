@@ -569,6 +569,22 @@ pub struct SelectedCut {
 }
 
 #[derive(Clone, Debug)]
+pub struct DomainChunkBuild {
+    pub cut: SelectedCut,
+    pub chunks: Vec<TriangleChunk>,
+    pub manifest: SelectedCutManifest,
+}
+
+impl DomainChunkBuild {
+    pub fn chunk_documents(&self) -> Vec<TriangleChunkDocument> {
+        self.chunks
+            .iter()
+            .map(TriangleChunkDocument::from_chunk)
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TriangleChunk {
     pub key: DomainKey,
     pub selected_cut_id: String,
@@ -771,6 +787,17 @@ pub fn select_domain_cut(root: &DomainNode, query: &DomainQuery) -> SelectedCut 
         deferred_children: state.deferred,
         fallback_nodes: state.fallback,
         diagnostics: state.diagnostics,
+    }
+}
+
+pub fn build_domain_chunks(root: &DomainNode, query: &DomainQuery) -> DomainChunkBuild {
+    let cut = select_domain_cut(root, query);
+    let chunks = lower_selected_cut_chunks(&cut);
+    let manifest = cut.manifest(&chunks);
+    DomainChunkBuild {
+        cut,
+        chunks,
+        manifest,
     }
 }
 
@@ -1652,6 +1679,21 @@ mod tests {
         assert_eq!(manifest.chunks.len(), chunks.len());
         assert_eq!(manifest.selected_nodes.len(), cut.selected_nodes.len());
         assert!(!manifest.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn build_domain_chunks_runs_full_runtime_pipeline() {
+        let fixture = ragnarok_column_fixture();
+        let build = build_domain_chunks(&fixture, &query(0.01, 10_000));
+        let documents = build.chunk_documents();
+        assert_eq!(build.manifest.id, build.cut.id);
+        assert_eq!(build.manifest.chunks.len(), build.chunks.len());
+        assert_eq!(documents.len(), build.chunks.len());
+        assert!(
+            documents
+                .iter()
+                .all(|document| !document.mesh.indices.is_empty())
+        );
     }
 
     #[test]
