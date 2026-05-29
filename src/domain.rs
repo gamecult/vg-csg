@@ -105,6 +105,36 @@ pub enum FeatureClaimKind {
     ColliderProxy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FeatureLoweringPolicy {
+    RenderOnly,
+    ColliderOnly,
+    RenderAndCollider,
+    BooleanOperator,
+}
+
+impl FeatureLoweringPolicy {
+    pub fn default_for_kind(kind: FeatureClaimKind) -> Self {
+        match kind {
+            FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume => {
+                Self::BooleanOperator
+            }
+            FeatureClaimKind::ColliderProxy => Self::ColliderOnly,
+            FeatureClaimKind::SolidBrush
+            | FeatureClaimKind::RoadSurfaceSlab
+            | FeatureClaimKind::SupportShell => Self::RenderAndCollider,
+        }
+    }
+
+    pub fn emits_to(self, target: ClaimLoweringTarget) -> bool {
+        match self {
+            Self::RenderOnly => target == ClaimLoweringTarget::Render,
+            Self::ColliderOnly => target == ClaimLoweringTarget::Collider,
+            Self::RenderAndCollider | Self::BooleanOperator => true,
+        }
+    }
+}
+
 impl FeatureClaimKind {
     pub fn field_layer(self) -> FieldLayer {
         match self {
@@ -152,6 +182,7 @@ pub struct FeatureClaim {
     pub support: Aabb,
     pub kind: FeatureClaimKind,
     pub material: MaterialId,
+    pub lowering: FeatureLoweringPolicy,
 }
 
 impl FeatureClaim {
@@ -199,6 +230,7 @@ pub struct FeatureClaimSpec {
     pub support: Aabb,
     pub kind: FeatureClaimKind,
     pub material: MaterialId,
+    pub lowering: FeatureLoweringPolicy,
 }
 
 impl FeatureClaimSpec {
@@ -215,7 +247,13 @@ impl FeatureClaimSpec {
             support,
             kind,
             material,
+            lowering: FeatureLoweringPolicy::default_for_kind(kind),
         }
+    }
+
+    pub fn with_lowering_policy(mut self, lowering: FeatureLoweringPolicy) -> Self {
+        self.lowering = lowering;
+        self
     }
 
     pub fn compile(&self, domain_key: &DomainKey) -> FeatureClaim {
@@ -226,6 +264,7 @@ impl FeatureClaimSpec {
             support: self.support,
             kind: self.kind,
             material: self.material,
+            lowering: self.lowering,
         }
     }
 }
@@ -558,22 +597,7 @@ fn claim_metadata(claims: &[FeatureClaim]) -> (Vec<DomainKey>, Vec<String>) {
 }
 
 fn claim_in_target(claim: &FeatureClaim, target: ClaimLoweringTarget) -> bool {
-    match target {
-        ClaimLoweringTarget::Render => {
-            claim.kind.emits_render()
-                || matches!(
-                    claim.kind,
-                    FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume
-                )
-        }
-        ClaimLoweringTarget::Collider => {
-            claim.kind.emits_collider()
-                || matches!(
-                    claim.kind,
-                    FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume
-                )
-        }
-    }
+    claim.lowering.emits_to(target)
 }
 
 fn build_claim_tree(
@@ -846,19 +870,21 @@ fn fallback_box_claim(
     if !bounds.is_valid() {
         return Vec::new();
     }
+    let kind = match kind {
+        DomainKind::ClearanceVolume => FeatureClaimKind::ClearanceVolume,
+        DomainKind::RoadSpine | DomainKind::BranchRoad | DomainKind::Roundabout => {
+            FeatureClaimKind::RoadSurfaceSlab
+        }
+        _ => FeatureClaimKind::SupportShell,
+    };
     vec![FeatureClaim {
         key: format!("{}/claim/fallback-summary", key.0),
         domain_key: key.clone(),
         frame,
         support: Aabb::from_center_size(Vec3::ZERO, bounds.size()),
-        kind: match kind {
-            DomainKind::ClearanceVolume => FeatureClaimKind::ClearanceVolume,
-            DomainKind::RoadSpine | DomainKind::BranchRoad | DomainKind::Roundabout => {
-                FeatureClaimKind::RoadSurfaceSlab
-            }
-            _ => FeatureClaimKind::SupportShell,
-        },
+        kind,
         material: MaterialId(1),
+        lowering: FeatureLoweringPolicy::default_for_kind(kind),
     }]
 }
 
@@ -995,13 +1021,7 @@ fn selection_collider_cost(node: &DomainNode) -> usize {
     };
     claims
         .iter()
-        .filter(|claim| {
-            claim.kind.emits_collider()
-                || matches!(
-                    claim.kind,
-                    FeatureClaimKind::VoidBrush | FeatureClaimKind::ClearanceVolume
-                )
-        })
+        .filter(|claim| claim.lowering.emits_to(ClaimLoweringTarget::Collider))
         .count()
         .max(1)
         * 12
@@ -1056,6 +1076,10 @@ mod tests {
         assert_eq!(road.parent, Some(domain.key.clone()));
         assert_eq!(road.claims[0].key, "root/road/claim/slab");
         assert_eq!(road.claims[0].domain_key, road.key);
+        assert_eq!(
+            road.claims[0].lowering,
+            FeatureLoweringPolicy::RenderAndCollider
+        );
     }
 
     #[test]
@@ -1140,6 +1164,34 @@ mod tests {
         assert!(lowering.root.is_some());
         assert!(lowering.arena.brush_count() > 0);
         assert!(lowering.arena.branch_count() > 0);
+    }
+
+    #[test]
+    fn lowering_policy_controls_render_and_collider_streams() {
+        let fixture = ragnarok_column_fixture();
+        let cut = select_domain_cut(&fixture, &query(0.01, 10_000));
+        let render =
+            lower_feature_claims_to_csg_tree(&cut.emitted_claims, ClaimLoweringTarget::Render);
+        let collider =
+            lower_feature_claims_to_csg_tree(&cut.emitted_claims, ClaimLoweringTarget::Collider);
+        assert!(
+            !render
+                .source_claim_keys
+                .iter()
+                .any(|key| key.ends_with("/claim/collider-proxy"))
+        );
+        assert!(
+            collider
+                .source_claim_keys
+                .iter()
+                .any(|key| key.ends_with("/claim/collider-proxy"))
+        );
+        assert!(
+            render
+                .source_claim_keys
+                .iter()
+                .any(|key| key.ends_with("/claim/hover-clearance"))
+        );
     }
 
     #[test]
