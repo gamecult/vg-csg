@@ -508,11 +508,7 @@ fn stable_u32_array(values: &[u32]) -> String {
 }
 
 fn stable_f32(value: f32) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.1}")
-    } else {
-        value.to_string()
-    }
+    value.to_string()
 }
 
 #[cfg(test)]
