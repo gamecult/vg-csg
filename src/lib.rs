@@ -10,6 +10,7 @@
 mod assembler;
 mod brush;
 mod convex;
+mod domain;
 mod dsl;
 mod frontier;
 mod mesh;
@@ -19,6 +20,11 @@ mod tree;
 pub use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
 pub use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
 pub use convex::{CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane, PolygonRouteScratch};
+pub use domain::{
+    ContributionRow, DomainFrame, DomainKey, DomainKind, DomainNode, DomainQuery, DomainSummary,
+    FeatureClaim, FeatureClaimKind, FieldEncoding, FieldLayer, SelectedCut, TriangleChunk,
+    lower_selected_cut, ragnarok_column_fixture, select_domain_cut,
+};
 pub use dsl::LevelDsl;
 pub use frontier::{DemandFrontier, DemandPair, DirtyDemandFrontier};
 pub use mesh::TriangleMesh;

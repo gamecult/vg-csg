@@ -4,7 +4,10 @@ use std::{
 };
 
 use bevy_math::{Quat, Vec3};
-use vg_csg::{Aabb, Assembler, BrushOp, MaterialId, Primitive};
+use vg_csg::{
+    Aabb, Assembler, BrushOp, DomainQuery, MaterialId, Primitive, lower_selected_cut,
+    ragnarok_column_fixture, select_domain_cut,
+};
 
 const WARMUP_ITERS: usize = 8;
 const MEASURE_ITERS: usize = 64;
@@ -49,6 +52,13 @@ fn main() {
         run_case(case, PerfMode::IncrementalDirty);
         run_case(case, PerfMode::Routed);
     }
+
+    run_lod_case(
+        "ragnarok_column_lod_tight",
+        ragnarok_lod_query(10_000.0, 100),
+    );
+    run_lod_case("ragnarok_column_lod_medium", ragnarok_lod_query(0.01, 560));
+    run_lod_case("ragnarok_column_lod_high", ragnarok_lod_query(0.01, 10_000));
 }
 
 #[derive(Clone, Copy)]
@@ -225,6 +235,96 @@ fn percentile_ns(values: &[Duration], percentile: usize) -> u128 {
     }
     let index = ((values.len() - 1) * percentile) / 100;
     values[index].as_nanos()
+}
+
+fn run_lod_case(name: &'static str, query: DomainQuery) {
+    let fixture = ragnarok_column_fixture();
+    let warmup_cut = select_domain_cut(&fixture, &query);
+    let warmup_chunk = lower_selected_cut(&warmup_cut);
+    black_box(warmup_chunk.mesh.triangle_count());
+
+    for _ in 0..WARMUP_ITERS {
+        let cut = select_domain_cut(&fixture, &query);
+        let chunk = lower_selected_cut(&cut);
+        black_box(chunk.mesh.triangle_count());
+    }
+
+    let mut timings = Vec::with_capacity(MEASURE_ITERS);
+    let mut selected_nodes = 0;
+    let mut emitted_claims = 0;
+    let mut triangles = 0;
+    let mut collider_triangles = 0;
+    let mut brush_count = 0;
+    let mut candidate_pairs = 0;
+    let mut rejected_pairs = 0;
+
+    for _ in 0..MEASURE_ITERS {
+        let start = Instant::now();
+        let cut = select_domain_cut(&fixture, &query);
+        let chunk = lower_selected_cut(&cut);
+        let elapsed = start.elapsed();
+        selected_nodes = cut.selected_nodes.len();
+        emitted_claims = cut.emitted_claims.len();
+        triangles = chunk.mesh.triangle_count();
+        collider_triangles = chunk
+            .collider_mesh
+            .as_ref()
+            .map_or(0, |mesh| mesh.triangle_count());
+        brush_count = chunk.report.input_brushes;
+        candidate_pairs = chunk.report.candidate_pairs;
+        rejected_pairs = chunk.report.rejected_pairs;
+        black_box((
+            selected_nodes,
+            emitted_claims,
+            triangles,
+            collider_triangles,
+            brush_count,
+            candidate_pairs,
+            rejected_pairs,
+        ));
+        timings.push(elapsed);
+    }
+
+    timings.sort_unstable();
+    let total = timings
+        .iter()
+        .fold(Duration::ZERO, |sum, value| sum + *value);
+    let mean_ns = total.as_nanos() / timings.len() as u128;
+    let min_ns = timings.first().map_or(0, Duration::as_nanos);
+    let max_ns = timings.last().map_or(0, Duration::as_nanos);
+    let p50_ns = percentile_ns(&timings, 50);
+    let p95_ns = percentile_ns(&timings, 95);
+
+    println!(
+        "{{\"kernel\":\"vg_csg\",\"mode\":\"lod_query\",\"scenario\":\"{}\",\"selected_nodes\":{},\"emitted_claims\":{},\"brushes\":{},\"iterations\":{},\"warmup_iterations\":{},\"mean_ns\":{},\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"max_ns\":{},\"triangles\":{},\"collider_triangles\":{},\"candidate_pairs\":{},\"rejected_pairs\":{}}}",
+        name,
+        selected_nodes,
+        emitted_claims,
+        brush_count,
+        MEASURE_ITERS,
+        WARMUP_ITERS,
+        mean_ns,
+        min_ns,
+        p50_ns,
+        p95_ns,
+        max_ns,
+        triangles,
+        collider_triangles,
+        candidate_pairs,
+        rejected_pairs
+    );
+}
+
+fn ragnarok_lod_query(target_error: f32, triangle_budget: usize) -> DomainQuery {
+    DomainQuery {
+        camera_position: Vec3::new(36.0, -42.0, 30.0),
+        frustum: Aabb::from_center_size(Vec3::new(0.0, 0.0, 45.0), Vec3::splat(150.0)),
+        target_error,
+        triangle_budget,
+        collider_budget: triangle_budget,
+        semantic_filter: Vec::new(),
+        requested_chunk_keys: Vec::new(),
+    }
 }
 
 fn single_center_cut() -> Assembler {
