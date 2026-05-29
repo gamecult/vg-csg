@@ -286,6 +286,96 @@ pub struct DomainSpecDocument {
     pub root: DomainNodeDocument,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DomainBuildRequestDocument {
+    pub schema_version: u32,
+    pub domain: DomainSpecDocument,
+    pub query: DomainQueryDocument,
+}
+
+impl DomainBuildRequestDocument {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+    pub fn build(&self) -> DomainChunkBuild {
+        build_domain_chunks(&self.domain.compile_root(), &self.query.to_query())
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(source)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DomainQueryDocument {
+    pub camera_position: [f32; 3],
+    pub frustum_min: [f32; 3],
+    pub frustum_max: [f32; 3],
+    pub viewport_height_px: f32,
+    pub vertical_fov_radians: f32,
+    pub target_error: f32,
+    pub triangle_budget: usize,
+    pub collider_budget: usize,
+    pub semantic_filter: Vec<DomainKind>,
+    pub requested_chunk_keys: Vec<String>,
+    pub dirty_domain_keys: Vec<String>,
+}
+
+impl DomainQueryDocument {
+    pub fn from_query(query: &DomainQuery) -> Self {
+        Self {
+            camera_position: vec3_to_array(query.camera_position),
+            frustum_min: vec3_to_array(query.frustum.min),
+            frustum_max: vec3_to_array(query.frustum.max),
+            viewport_height_px: query.viewport_height_px,
+            vertical_fov_radians: query.vertical_fov_radians,
+            target_error: query.target_error,
+            triangle_budget: query.triangle_budget,
+            collider_budget: query.collider_budget,
+            semantic_filter: query.semantic_filter.clone(),
+            requested_chunk_keys: query
+                .requested_chunk_keys
+                .iter()
+                .map(|key| key.0.clone())
+                .collect(),
+            dirty_domain_keys: query
+                .dirty_domain_keys
+                .iter()
+                .map(|key| key.0.clone())
+                .collect(),
+        }
+    }
+
+    pub fn to_query(&self) -> DomainQuery {
+        DomainQuery {
+            camera_position: array_to_vec3(self.camera_position),
+            frustum: Aabb::new(
+                array_to_vec3(self.frustum_min),
+                array_to_vec3(self.frustum_max),
+            ),
+            viewport_height_px: self.viewport_height_px,
+            vertical_fov_radians: self.vertical_fov_radians,
+            target_error: self.target_error,
+            triangle_budget: self.triangle_budget,
+            collider_budget: self.collider_budget,
+            semantic_filter: self.semantic_filter.clone(),
+            requested_chunk_keys: self
+                .requested_chunk_keys
+                .iter()
+                .map(|key| DomainKey::new(key.clone()))
+                .collect(),
+            dirty_domain_keys: self
+                .dirty_domain_keys
+                .iter()
+                .map(|key| DomainKey::new(key.clone()))
+                .collect(),
+        }
+    }
+}
+
 impl DomainSpecDocument {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -1694,6 +1784,24 @@ mod tests {
                 .iter()
                 .all(|document| !document.mesh.indices.is_empty())
         );
+    }
+
+    #[test]
+    fn domain_build_request_document_round_trips_worker_input() {
+        let request = DomainBuildRequestDocument {
+            schema_version: DomainBuildRequestDocument::CURRENT_SCHEMA_VERSION,
+            domain: DomainSpecDocument::from_spec(&ragnarok_column_spec()),
+            query: DomainQueryDocument::from_query(&query(0.01, 10_000)),
+        };
+        let json = request.to_json_pretty().unwrap();
+        let decoded = DomainBuildRequestDocument::from_json(&json).unwrap();
+        let build = decoded.build();
+        assert_eq!(
+            decoded.schema_version,
+            DomainBuildRequestDocument::CURRENT_SCHEMA_VERSION
+        );
+        assert!(!build.chunks.is_empty());
+        assert_eq!(build.manifest.chunks.len(), build.chunks.len());
     }
 
     #[test]
