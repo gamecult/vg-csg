@@ -508,7 +508,7 @@ fn stable_u32_array(values: &[u32]) -> String {
 }
 
 fn stable_f32(value: f32) -> String {
-    value.to_string()
+    format!("{:08x}", value.to_bits())
 }
 
 #[cfg(test)]
